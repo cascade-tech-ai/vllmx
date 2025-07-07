@@ -14,6 +14,8 @@ from typing_extensions import deprecated
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+# Predicted output support
+from vllm.spec_decode.predicted_output_params import PredictedOutputParams
 
 logger = init_logger(__name__)
 
@@ -244,6 +246,9 @@ class SamplingParams(
     allowed_token_ids: Optional[list[int]] = None
     extra_args: Optional[dict[str, Any]] = None
 
+    # Short: *predicted outputs* parameters for speculative decoding.
+    predicted_outputs: Optional[PredictedOutputParams] = None
+
     # Fields used for bad words
     bad_words: Optional[list[str]] = None
     _bad_words_token_ids: Optional[list[list[int]]] = None
@@ -280,6 +285,9 @@ class SamplingParams(
         logit_bias: Optional[Union[dict[int, float], dict[str, float]]] = None,
         allowed_token_ids: Optional[list[int]] = None,
         extra_args: Optional[dict[str, Any]] = None,
+
+        # Predicted outputs
+        predicted_outputs: Optional[PredictedOutputParams] = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Convert token_id to integer
@@ -322,6 +330,8 @@ class SamplingParams(
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
             extra_args=extra_args,
+
+            predicted_outputs=predicted_outputs,
         )
 
     def __post_init__(self) -> None:

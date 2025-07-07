@@ -26,6 +26,10 @@ from vllm.v1.structured_output.backend_guidance import (
 from vllm.v1.structured_output.backend_xgrammar import (
     validate_xgrammar_grammar)
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 class Processor:
 
@@ -275,6 +279,30 @@ class Processor:
             self.generation_config_fields, eos_token_id)
         sampling_params.update_from_tokenizer(
             self.tokenizer.get_lora_tokenizer(lora_request))
+
+        # --------------------------------------------------------------
+        # Predicted outputs support (static-text speculative decoding).
+        # If the caller supplied *predicted_text* but omitted the
+        # pre-tokenised representation we convert it here so that the worker
+        # receives ready-to-use token IDs – avoids repeated tokenisation in
+        # the GPU process and keeps v1 completely CPU-side.
+        # --------------------------------------------------------------
+
+        if (sampling_params.predicted_outputs is not None and
+                sampling_params.predicted_outputs.predicted_token_ids is None
+                and sampling_params.predicted_outputs.predicted_text):
+            try:
+                predicted_ids = self.tokenizer.encode(
+                    prompt=sampling_params.predicted_outputs.predicted_text,
+                    add_special_tokens=False,
+                )
+                sampling_params.predicted_outputs.predicted_token_ids = predicted_ids  # type: ignore[assignment]
+            except Exception as exc:  # pragma: no cover
+                logger.warning(
+                    "Failed to tokenize predicted_text for request %s: %s",
+                    request_id,
+                    exc,
+                )
 
         # Multimodal related.
         sorted_mm_inputs: Optional[Sequence[Optional[MultiModalKwargs]]] = None

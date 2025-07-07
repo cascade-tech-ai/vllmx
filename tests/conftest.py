@@ -156,7 +156,6 @@ def run_with_both_engines(request, monkeypatch):
 
     yield
 
-
 @pytest.fixture(autouse=True)
 def init_test_http_connection():
     # pytest_asyncio may use a different event loop per test
@@ -1148,10 +1147,31 @@ def dummy_gemma2_embedding_path():
 # Add the flag `--optional` to allow run tests
 # that are marked with @pytest.mark.optional
 def pytest_addoption(parser):
-    parser.addoption("--optional",
-                     action="store_true",
-                     default=False,
-                     help="run optional test")
+    # Existing optional flag ------------------------------------------------
+    parser.addoption(
+        "--optional",
+        action="store_true",
+        default=False,
+        help="run optional test",
+    )
+
+    # Smart-prediction customisation flags ---------------------------------
+    group = parser.getgroup("smart-prediction options")
+    group.addoption(
+        "--look-ahead",
+        metavar="N",
+        default="32",
+        help="Token look-ahead used by smart-prediction simulations (default: 32)",
+    )
+    group.addoption(
+        "--predictor",
+        metavar="NAME",
+        default="line_diff",
+        help=(
+            "Advanced predictor to evaluate (line_diff, greedy_suffix, "
+            "naive_sequential). Default: line_diff",
+        ),
+    )
 
 
 def pytest_collection_modifyitems(config, items):

@@ -161,13 +161,58 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         allow_zero_draft_token_step = True
         enable_lm_head_weight_load = False
         num_spec_prefill_steps = 1
+
+        # Get the speculative configuration for convenience.
+        speculative_config: SpeculativeConfig = draft_worker_kwargs["vllm_config"].speculative_config  # type: ignore[attr-defined]
         ngram_prompt_lookup_max = (
             draft_worker_kwargs.pop("ngram_prompt_lookup_max"))
         ngram_prompt_lookup_min = (
             draft_worker_kwargs.pop("ngram_prompt_lookup_min"))
-        draft_model_config = draft_worker_kwargs["vllm_config"].model_config
-        draft_parallel_config: ParallelConfig = draft_worker_kwargs[
-            'vllm_config'].parallel_config
+
+        # ----- StaticText proposer (no draft model) -------------------------
+
+        if speculative_config.method == "static_text":
+            # Disable MQA scorer for this path.
+            disable_mqa_scorer = True
+
+            from vllm.utils import resolve_obj_by_qualname
+
+            proposer_cls = resolve_obj_by_qualname(
+                speculative_config.model or
+                "vllm.spec_decode.static_text_worker.StaticTextWorker")
+
+            draft_worker_kwargs["device_type"] = scorer_worker.device_config.device.type
+
+            proposer_worker = proposer_cls(**draft_worker_kwargs)
+
+            # For static-text we use a simple rejection sampler.
+            from vllm.model_executor.layers.rejection_sampler import RejectionSampler
+
+            spec_decode_sampler = RejectionSampler()
+
+            logger.info(
+                "Configuring SpecDecodeWorker (static_text) with proposer=%s",
+                type(proposer_worker),
+            )
+
+            return cls(
+                proposer_worker,
+                scorer_worker,
+                spec_decode_sampler=spec_decode_sampler,
+                disable_mqa_scorer=True,
+                disable_logprobs=disable_logprobs,
+                disable_log_stats=disable_log_stats,
+                disable_by_batch_size=disable_by_batch_size,
+                allow_zero_draft_token_step=True,
+                enable_lm_head_weight_load=False,
+                num_spec_prefill_steps=1,
+            )
+
+        else:
+
+            draft_model_config = draft_worker_kwargs["vllm_config"].model_config
+            draft_parallel_config: ParallelConfig = draft_worker_kwargs[
+                'vllm_config'].parallel_config
         if ngram_prompt_lookup_max > 0:
             draft_worker_kwargs[
                 "device_type"] = scorer_worker.device_config.device.type

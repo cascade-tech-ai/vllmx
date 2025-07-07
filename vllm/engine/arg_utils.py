@@ -1371,10 +1371,12 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # V1 supports N-gram, Medusa, and Eagle speculative decoding.
+        # V1 supports N-gram, Medusa, Eagle, and Static-Text speculative
+        # decoding (the latter implemented downstream).
         is_ngram_enabled = False
         is_eagle_enabled = False
         is_medusa_enabled = False
+        is_static_text_enabled = False
         if self.speculative_config is not None:
             # This is supported but experimental (handled below).
             speculative_method = self.speculative_config.get("method")
@@ -1385,11 +1387,13 @@ class EngineArgs:
                     is_medusa_enabled = True
                 elif speculative_method in ("eagle", "eagle3", "deepseek_mtp"):
                     is_eagle_enabled = True
+                elif speculative_method == "static_text":
+                    is_static_text_enabled = True
             else:
                 speculative_model = self.speculative_config.get("model")
                 if speculative_model in ("ngram", "[ngram]"):
                     is_ngram_enabled = True
-            if not (is_ngram_enabled or is_eagle_enabled or is_medusa_enabled):
+            if not (is_ngram_enabled or is_eagle_enabled or is_medusa_enabled or is_static_text_enabled):
                 # Other speculative decoding methods are not supported yet.
                 _raise_or_fallback(feature_name="Speculative Decoding",
                                    recommend_to_remove=False)

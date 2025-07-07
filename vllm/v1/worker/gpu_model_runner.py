@@ -156,6 +156,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.speculative_config and get_pp_group().is_last_rank:
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
+            elif self.speculative_config.method == "static_text":
+                from vllm.v1.spec_decode.static_text_proposer import StaticTextProposer  # local import
+
+                self.drafter = StaticTextProposer(self.vllm_config)
             elif self.speculative_config.use_eagle():
                 self.drafter = EagleProposer(self.vllm_config, self.device,
                                              self)  # type: ignore
@@ -1389,6 +1393,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert isinstance(self.drafter, NgramProposer)
             spec_token_ids = self.generate_draft_token_ids(
                 valid_sampled_token_ids, sampling_metadata)
+        elif self.speculative_config.method == "static_text":
+            from vllm.v1.spec_decode.static_text_proposer import StaticTextProposer  # type: ignore
+
+            assert isinstance(self.drafter, StaticTextProposer)
+            spec_token_ids = self.generate_static_text_drafts(
+                valid_sampled_token_ids)
         elif self.speculative_config.method == "medusa":
             assert isinstance(self.drafter, MedusaProposer)
             if max_gen_len == 1:
@@ -1589,6 +1599,77 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 draft_token_ids.append([])
             else:
                 draft_token_ids.append(drafter_output.tolist())
+        return draft_token_ids
+
+    # ------------------------------------------------------------------ static text helper
+
+    def generate_static_text_drafts(
+        self,
+        sampled_token_ids: list[list[int]],
+    ) -> list[list[int]]:
+        """Generate drafts using StaticTextProposer.
+
+        This helper mirrors `generate_draft_token_ids` but delegates to the
+        StaticTextProposer which needs *predicted outputs* from the request’s
+        `SamplingParams`.
+        """
+        from vllm.v1.spec_decode.static_text_proposer import StaticTextProposer  # type: ignore
+
+        assert isinstance(self.drafter, StaticTextProposer)
+
+        draft_token_ids: list[list[int]] = []
+
+        tokenizer = getattr(self.drafter, "_tokenizer", None)
+
+        for i, sampled_ids in enumerate(sampled_token_ids):
+            # Skip requests that sampled no tokens in this step.
+            num_sampled_ids = len(sampled_ids)
+            if num_sampled_ids == 0:
+                draft_token_ids.append([])
+                continue
+
+            req_id = self.input_batch.req_ids[i]
+
+            # Retrieve prediction for this request.
+            pred_params = self.requests[req_id].sampling_params.predicted_outputs
+            if pred_params is None or not pred_params.has_prediction():
+                draft_token_ids.append([])
+                continue
+
+            # Only pass the *output* portion (exclude prompt) to the drafter.
+            prompt_len = self.requests[req_id].num_prompt_tokens
+            context_end_idx = self.input_batch.num_tokens_no_spec[i]
+            prev_context_ids = self.input_batch.token_ids_cpu[i, prompt_len:context_end_idx]
+
+            context_ids = np.concatenate((
+                prev_context_ids,
+                np.array(sampled_token_ids[i], dtype=np.int32)
+            ))
+
+            if tokenizer:
+                context_text = tokenizer.decode(context_ids)
+
+            if pred_params.predicted_token_ids is None:
+                # For the initial implementation we require pre-tokenised
+                # predictions.  Clients can obtain token IDs easily from the
+                # tokenizer and avoid the overhead of encoding inside the v1
+                # worker process.
+                draft_token_ids.append([])
+                continue
+
+            pred_tokens = list(pred_params.predicted_token_ids)
+
+            drafter_output = self.drafter.propose(
+                req_id=req_id,
+                context_token_ids=context_ids,
+                predicted_token_ids=pred_tokens,
+            )
+
+            if drafter_output is None:
+                draft_token_ids.append([])
+            else:
+                draft_token_ids.append(drafter_output.tolist())
+
         return draft_token_ids
 
     def load_model(self) -> None:

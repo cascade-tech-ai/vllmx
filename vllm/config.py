@@ -2338,7 +2338,7 @@ class DeviceConfig:
 
 
 SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
-                            "mlp_speculator", "draft_model", "deepseek_mtp"]
+                            "mlp_speculator", "draft_model", "deepseek_mtp", "static_text"]
 SpeculativeAcceptanceMethod = Literal["rejection_sampler",
                                       "typical_acceptance_sampler"]
 
@@ -2502,7 +2502,8 @@ class SpeculativeConfig:
         # can not be detected, it will be considered as the "draft_model" by
         # default.
 
-        if self.model is None and self.num_speculative_tokens is not None:
+        if (self.model is None and self.num_speculative_tokens is not None
+                and self.method != "static_text"):
             # TODO(Shangming): Refactor mtp configuration logic when supporting
             # mtp acceleration for more models besides deepseek_v3
             if self.target_model_config and \
@@ -2555,6 +2556,13 @@ class SpeculativeConfig:
             # TODO: current we still need extract vocab_size from target model
             # config, in future, we may try refactor it out, and set
             # draft related config as None here.
+            self.draft_model_config = self.target_model_config
+            self.draft_parallel_config = self.target_parallel_config
+        elif self.method == "static_text":
+            # Static-text proposer does not need a separate draft model –
+            # reuse the target model configs so that downstream code paths
+            # accessing attributes like `draft_model_config.hf_config` remain
+            # valid.
             self.draft_model_config = self.target_model_config
             self.draft_parallel_config = self.target_parallel_config
         else:

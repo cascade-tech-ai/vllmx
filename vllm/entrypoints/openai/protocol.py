@@ -22,6 +22,7 @@ from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
                                   RequestOutputKind, SamplingParams)
+from vllm.spec_decode.predicted_output_params import PredictedOutputParams
 from vllm.sequence import Logprob
 from vllm.utils import random_uuid, resolve_obj_by_qualname
 
@@ -413,6 +414,19 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description="KVTransfer parameters used for disaggregated serving.")
 
+    # ------------------------------------------------------------------
+    # Predicted outputs (speculative decoding helper)
+    # ------------------------------------------------------------------
+    # The OpenAI API exposes this as the optional ``prediction`` object.  When
+    # present we will pass its *content* to the vLLM engine so a speculative
+    # proposer can fast-forward through the known prefix.
+
+    class _PredictionParam(OpenAIBaseModel):  # noqa: D401 – nested helper
+        type: Literal["content"] = "content"
+        content: str
+
+    prediction: Optional[_PredictionParam] = None
+
     # --8<-- [end:chat-completion-extra-params]
 
     # Default sampling parameters for chat completion requests
@@ -552,7 +566,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=({"kv_transfer_params": self.kv_transfer_params}
-                        if self.kv_transfer_params else None))
+                        if self.kv_transfer_params else None),
+
+            predicted_outputs=(
+                PredictedOutputParams(predicted_text=self.prediction.content)
+                if self.prediction is not None else None),
+        )
 
     def _get_guided_json_from_tool(
             self) -> Optional[Union[str, dict, BaseModel]]:
