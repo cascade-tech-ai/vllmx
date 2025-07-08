@@ -1,0 +1,29 @@
+# syntax=docker/dockerfile:1
+
+# -----------------------------------------------------------------------------
+#  Dockerfile.vllmx  –  builds the GPU-enabled OpenAI-compatible server image
+#  for the vllmx fork while re-using vLLM’s pre-built CUDA/C++ binaries.
+#
+#  Build:
+#    DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.vllmx \
+#       -t vllmx-openai --target vllmx-openai .
+# -----------------------------------------------------------------------------
+
+# Pin to the desired vLLM release (GPU / CUDA build)
+# Change the tag here if you need a different upstream version.
+FROM vllm/vllm-openai:v0.9.1 AS vllmx-openai
+
+# Skip kernel compilation; reuse upstream pre-built wheel.
+ENV VLLM_USE_PRECOMPILED=1
+
+# Copy project source.
+WORKDIR /workspace/vllmx
+COPY . /workspace/vllmx
+
+# Install Python portion of fork (incl. any new deps in requirements/*).
+# Remove the pre-installed wheel (from the base image) and overlay our fork.
+RUN pip uninstall -y vllm && \
+    pip install --no-cache-dir --no-build-isolation --editable .
+
+# Launch the OpenAI-compatible API server by default.
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
