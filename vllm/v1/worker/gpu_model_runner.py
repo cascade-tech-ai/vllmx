@@ -1613,13 +1613,47 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         StaticTextProposer which needs *predicted outputs* from the request’s
         `SamplingParams`.
         """
-        from vllm.v1.spec_decode.static_text_proposer import StaticTextProposer  # type: ignore
+        # Import here to avoid heavy dependency at module import time.
+        from vllm.v1.spec_decode.static_text_proposer import (
+            StaticTextProposer, DEBUG_PREDICTED_OUTPUTS,
+        )  # type: ignore
 
         assert isinstance(self.drafter, StaticTextProposer)
 
         draft_token_ids: list[list[int]] = []
 
         tokenizer = getattr(self.drafter, "_tokenizer", None)
+
+        # Helper to write YAML debug logs *after* each iteration when the
+        # DEBUG_PREDICTED_OUTPUTS switch is enabled.
+        if DEBUG_PREDICTED_OUTPUTS:
+            import os
+            try:
+                import yaml  # type: ignore
+            except ModuleNotFoundError:  # pragma: no cover – debug only
+                yaml = None  # type: ignore
+
+            def _write_debug_yaml(req_id: str, debug_state: dict):
+                try:
+                    base_home = os.getenv("VLLMX_HOME",
+                                          os.path.expanduser("~/.vllmx"))
+                    log_dir = os.path.join(base_home, "log")
+                    os.makedirs(log_dir, exist_ok=True)
+                    file_path = os.path.join(log_dir, f"{req_id}.yaml")
+                    if yaml is not None:
+                        # Use safe_dump for security – allow_unicode to preserve newlines.
+                        with open(file_path, "w", encoding="utf-8") as f:
+                            yaml.safe_dump(debug_state,
+                                            f,
+                                            sort_keys=False,
+                                            allow_unicode=True)
+                    else:
+                        # Fall back to repr if PyYAML is missing.
+                        with open(file_path, "w", encoding="utf-8") as f:
+                            f.write(repr(debug_state))
+                except Exception as exc:  # pragma: no cover – best effort only
+                    logger.error("Failed to write debug YAML for %s: %s", req_id,
+                                 exc)
 
         for i, sampled_ids in enumerate(sampled_token_ids):
             # Skip requests that sampled no tokens in this step.
@@ -1659,16 +1693,59 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             pred_tokens = list(pred_params.predicted_token_ids)
 
+            # ------------------------------------------------------------------
+            # Optional structured debug logging – record timings and let the
+            # StaticTextProposer enrich the iteration dict with *context*-based
+            # fields.
+            # ------------------------------------------------------------------
+
+            debug_iteration: dict | None = None
+            start = time.time() if DEBUG_PREDICTED_OUTPUTS else 0.0
+
+            if DEBUG_PREDICTED_OUTPUTS:
+                debug_iteration = {
+                    "new_tokens": sampled_ids,
+                    "new_text": tokenizer.decode(sampled_ids)
+                    if tokenizer else "",
+                }
+
             drafter_output = self.drafter.propose(
                 req_id=req_id,
                 context_token_ids=context_ids,
                 predicted_token_ids=pred_tokens,
+                debug_iteration=debug_iteration,
             )
 
+            duration = (time.time() - start) if DEBUG_PREDICTED_OUTPUTS else 0.0
+
+            # Convert drafter output to list for downstream code.
             if drafter_output is None:
-                draft_token_ids.append([])
+                proposed_list: list[int] = []
             else:
-                draft_token_ids.append(drafter_output.tolist())
+                proposed_list = drafter_output.tolist()
+
+            draft_token_ids.append(proposed_list)
+
+            # Finalise debug logging for this iteration.
+            if DEBUG_PREDICTED_OUTPUTS and debug_iteration is not None:
+                debug_iteration["predicted_tokens"] = proposed_list
+                debug_iteration["predicted_text"] = (
+                    tokenizer.decode(proposed_list) if tokenizer else ""
+                )
+                debug_iteration["duration"] = duration
+
+                # Retrieve per-request debug_state that StaticTextProposer
+                # maintains and ensure the iteration dict reference is already
+                # appended.
+                try:
+                    st = self.drafter._state[req_id]  # type: ignore[attr-defined]
+                    debug_state = st.debug_state  # noqa: SLF001 – internal attr
+                    if debug_state is not None:
+                        # YAML write-out.
+                        _write_debug_yaml(req_id, debug_state)
+                except Exception as exc:  # pragma: no cover – best effort
+                    logger.error("Failed to finalize debug log for %s: %s", req_id,
+                                 exc)
 
         return draft_token_ids
 
