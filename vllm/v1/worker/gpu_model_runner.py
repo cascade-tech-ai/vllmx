@@ -1658,8 +1658,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for i, sampled_ids in enumerate(sampled_token_ids):
             # Skip requests that sampled no tokens in this step.
             num_sampled_ids = len(sampled_ids)
+
+            # If the model produced no new tokens record an empty iteration so
+            # that the debug timeline remains contiguous.
             if num_sampled_ids == 0:
                 draft_token_ids.append([])
+
+                if DEBUG_PREDICTED_OUTPUTS:
+                    empty_iter = {"note": "no sampled ids"}
+
+                    if hasattr(self.drafter, "_state"):
+                        st = self.drafter._state.get(self.input_batch.req_ids[i], None)  # type: ignore[attr-defined]
+                        if st and st.debug_state is not None:  # noqa: SLF001
+                            st.debug_state["iterations"].append(empty_iter)
+                            _write_debug_yaml(self.input_batch.req_ids[i], st.debug_state)
+
                 continue
 
             req_id = self.input_batch.req_ids[i]

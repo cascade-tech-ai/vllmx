@@ -45,7 +45,7 @@ from vllm.logger import init_logger
 # actual file-write so that the log entry can include the overall iteration
 # latency.
 
-DEBUG_PREDICTED_OUTPUTS = False  # noqa: N816 – global constant by design
+DEBUG_PREDICTED_OUTPUTS = True  # noqa: N816 – global constant by design
 
 # ---------------------------------------------------------------------------
 # Optional high-performance diff library *rapidfuzz*.
