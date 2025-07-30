@@ -292,8 +292,18 @@ class Processor:
                 sampling_params.predicted_outputs.predicted_token_ids is None
                 and sampling_params.predicted_outputs.predicted_text):
             try:
+                # Normalize Windows line endings ("\r\n") and bare carriage
+                # returns ("\r") to a single Unix newline ("\n") **before**
+                # tokenization so that the tokenizer sees a consistent text
+                # representation regardless of the originating platform.
+                normalized_text = (
+                    sampling_params.predicted_outputs.predicted_text
+                    .replace("\r\n", "\n")
+                    .replace("\r", "\n")
+                )
+
                 predicted_ids = self.tokenizer.encode(
-                    prompt=sampling_params.predicted_outputs.predicted_text,
+                    prompt=normalized_text,
                     add_special_tokens=False,
                 )
                 sampling_params.predicted_outputs.predicted_token_ids = predicted_ids  # type: ignore[assignment]

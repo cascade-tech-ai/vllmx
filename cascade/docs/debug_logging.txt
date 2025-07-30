@@ -1,0 +1,19 @@
+Ok, so we are facing an issue where we don't seem to be getting good predictions from StaticTextProposer all the time.  Basic tests work, but with real world examples on the server we don't seem to be getting predictions in cases where we should be.
+
+I think the next step is to add some more sophisticated debug logging.  In particular, I would like to make a custom structured log specific to this system that outputs a .yaml file with information about the entire request as well as each iteration of the predictor.
+
+This is the plan:
+- This can all be enabled with a hard coded DEBUG_PREDICTED_OUTPUTS = True which lives in static_text_proposer.py and can be imported into gpu_model_runner.py as needed.
+- We will keep a debug_state dict in our state dict that will keep the structure that will be written out to a yaml file with each iteration of prediction.
+- The top will be basic stats.
+- Then we will have an "iterations" list that will contain information about each iteration:
+  - new_text/new_tokens should contain new *output* tokens since the last iteration.  i think we can just get this with sampled_token_ids?
+  - new_context_lines_text and new_context_lines_tokens.  This one is trickier!  I think the easiest way is to just take completed_lines_text, subtract off the lines from the last iteration in the debug state, and then write only the new lines.
+  - current_prefix_text / current_prefix_tokens for the prefix
+  - predicted_text / predicted_tokens: this is what was predicted by propose.  both just empty if nothing was proposed (ie alignment failed)
+  - duration: the time it took to run StaticTextProposer.propose() (actually the whole iteration in the loop in generate_static_text_drafts)
+- predicted_lines_text/predicted_lines_tokens should be the entire thing that was predicted, we can keep that at the bottom
+
+you probably want to pass the struct of the current iteration into the propose() function in static_text_proposer.
+
+we should write the contents of that struct out to a yaml file after each iteration, using the request id as the filename with .yaml.  for the folder, assume "~/.vllmx/log/" if "VLLMX_HOME" isn't set, if it is, use $VLLMX_HOME/log/

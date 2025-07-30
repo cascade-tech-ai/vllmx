@@ -26,13 +26,36 @@ the CPU worker process without touching GPU memory.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple, Set
+from typing import Dict, List, Optional, Tuple, Set, TYPE_CHECKING
 
 import difflib
 import numpy as np
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+
+# ---------------------------------------------------------------------------
+# YAML helper – ensure *inner* token lists are emitted in **flow** style so
+# that each list appears on a single line: ``[1, 2, 3]``.  We do this by
+# defining a lightweight ``FlowList`` subtype with a custom representer.
+# ---------------------------------------------------------------------------
+
+try:
+    import yaml  # type: ignore
+
+    class FlowList(list):
+        """Marker subclass – dumped using YAML *flow* style."""
+
+    def _represent_flow_seq(dumper: yaml.Dumper, data: list):  # type: ignore[name-defined]
+        return dumper.represent_sequence(
+            "tag:yaml.org,2002:seq", data, flow_style=True)
+
+    yaml.SafeDumper.add_representer(FlowList, _represent_flow_seq)  # type: ignore[attr-defined]
+
+except ModuleNotFoundError:  # pragma: no cover – YAML optional for production
+
+    class FlowList(list):  # type: ignore[empty-body]
+        pass
 
 # ---------------------------------------------------------------------------
 # Development / debugging switches
@@ -258,8 +281,10 @@ class StaticTextProposer:
         self.k = vllm_config.speculative_config.num_speculative_tokens
         self.vllm_config = vllm_config
 
-        # Tokeniser for newline detection (loaded lazily).
+        # Tokeniser and model-wide newline set (both initialised lazily the
+        # first time we need them).
         self._tokenizer = None
+        self._global_newline_set: Set[int] | None = None
 
         # req_id → _ReqState
         self._state: Dict[str, _ReqState] = {}
@@ -298,6 +323,12 @@ class StaticTextProposer:
         # Update incremental context buffers.
         for tok in ctx_tokens[st.ctx_processed:]:
             st.current_line_tokens.append(tok)
+
+            # The newline set is now *comprehensive* because it is generated
+            # once at startup by exhaustively scanning the full vocabulary in
+            # `_detect_newline_tokens`.  We therefore avoid the previous,
+            # expensive per-token decode that attempted to discover newline
+            # tokens on-the-fly.
             if tok in st.newline_set:
                 st.ctx_line_tuples.append(tuple(st.current_line_tokens))
                 st.current_line_tokens.clear()
@@ -316,28 +347,43 @@ class StaticTextProposer:
         predicted_lines_text = [self._tokenizer.decode(l) for l in st.predicted_line_tuples]
         completed_lines_text = [self._tokenizer.decode(l) for l in completed]
 
+
+        # ------------------------------------------------------------------
+        # Attempt alignment between *completed* context lines and the global
+        # prediction. Instead of returning early on failure we record the
+        # mismatch and continue so that debug logging still happens – this
+        # is crucial when investigating why alignment fails in production.
+        # ------------------------------------------------------------------
+
+        success = True
+
         line_cursor = _align_cursor_lines(st.predicted_line_tuples, completed)
         if line_cursor is None or line_cursor >= len(st.predicted_line_tuples):
-            return None
+            success = False
 
-        pred_line_start = st.line_starts[line_cursor]
+        if success:
+            pred_line_start = st.line_starts[line_cursor]
 
-        # Build predicted line tokens.
-        pred_line_tokens: List[int] = []
-        idx = pred_line_start
-        while idx < len(st.predicted_tokens) and st.predicted_tokens[idx] not in st.newline_set:
-            pred_line_tokens.append(st.predicted_tokens[idx])
-            idx += 1
+            # Build predicted line tokens for the *current* line.
+            pred_line_tokens: List[int] = []
+            idx = pred_line_start
+            while idx < len(st.predicted_tokens) and st.predicted_tokens[idx] not in st.newline_set:
+                pred_line_tokens.append(st.predicted_tokens[idx])
+                idx += 1
 
-        if current_prefix != pred_line_tokens[:len(current_prefix)]:
-            return None
+            if current_prefix != pred_line_tokens[:len(current_prefix)]:
+                success = False
 
-        token_cursor = pred_line_start + len(current_prefix)
-        if token_cursor >= len(st.predicted_tokens):
-            return None
+        if success:
+            token_cursor = pred_line_start + len(current_prefix)
+            if token_cursor >= len(st.predicted_tokens):
+                success = False
 
-        end = min(token_cursor + self.k, len(st.predicted_tokens))
-        arr = np.array(st.predicted_tokens[token_cursor:end], dtype=np.int32)
+        if success:
+            end = min(token_cursor + self.k, len(st.predicted_tokens))
+            arr = np.array(st.predicted_tokens[token_cursor:end], dtype=np.int32)
+        else:
+            arr = np.empty(0, dtype=np.int32)
 
         logger.info(f"Context:\n" + "".join(self._tokenizer.decode(t) for t in st.ctx_line_tuples))
         logger.info(f"Predicted {len(arr)} tokens: {self._tokenizer.decode(arr)}")
@@ -353,7 +399,7 @@ class StaticTextProposer:
             # tokenizer to decode the prediction.
             if st.debug_state is None:
                 st.debug_state = {
-                    "predicted_lines_tokens": [list(t) for t in st.predicted_line_tuples],
+                    "predicted_lines_tokens": [FlowList(t) for t in st.predicted_line_tuples],
                     "predicted_lines_text": predicted_lines_text,
                     "iterations": [],
                 }
@@ -363,25 +409,25 @@ class StaticTextProposer:
             new_completed = completed[prev_len:]
             st._debug_prev_completed_len = len(completed)
 
-            debug_iteration["new_context_lines_tokens"] = [list(t) for t in new_completed]
+            debug_iteration["new_context_lines_tokens"] = [FlowList(t) for t in new_completed]
             debug_iteration["new_context_lines_text"] = [
                 self._tokenizer.decode(t) for t in new_completed
             ]
 
             # Current *in-progress* prefix (may be empty when context ends with
             # a newline).
-            debug_iteration["current_prefix_tokens"] = current_prefix
+            debug_iteration["current_prefix_tokens"] = FlowList(current_prefix)
             debug_iteration["current_prefix_text"] = self._tokenizer.decode(
                 current_prefix) if current_prefix else ""
 
             # Proposer output – will be overwritten by caller *after* the
             # duration is measured so we only set a default here.
             if arr.size > 0:
-                debug_iteration.setdefault("predicted_tokens", arr.tolist())
+                debug_iteration.setdefault("predicted_tokens", FlowList(arr.tolist()))
                 debug_iteration.setdefault("predicted_text",
                                             self._tokenizer.decode(arr))
             else:
-                debug_iteration.setdefault("predicted_tokens", [])
+                debug_iteration.setdefault("predicted_tokens", FlowList())
                 debug_iteration.setdefault("predicted_text", "")
 
             # Finally append to the iterations list – the caller may still
@@ -393,33 +439,54 @@ class StaticTextProposer:
 
     # ------------------------------------------------------------------ internal helpers
 
-    def _detect_newline_tokens(self, tokens: List[int]) -> Set[int]:
-        newline_set: Set[int] = set()
+    def _detect_newline_tokens(self, tokens: List[int] | None = None) -> Set[int]:
+        """Return *global* set of token ids whose decoded form contains "\n".
 
-        # Lazily load tokenizer
+        The scan over the entire vocabulary is performed **once** per
+        StaticTextProposer instance to maximise runtime performance during
+        generation.  Subsequent calls simply return the cached set.
+        """
+
+        if self._global_newline_set is not None:
+            return self._global_newline_set
+
+        # Lazily load tokenizer.
         if self._tokenizer is None:
             from transformers import AutoTokenizer  # local import
 
             model_name_or_path = self.vllm_config.model_config.model  # type: ignore[attr-defined]
             self._tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, use_fast=True)
 
-        seen: Set[int] = set()
-        for tok in tokens:
-            if tok in seen:
-                continue
-            seen.add(tok)
-            if "\n" in self._tokenizer.decode([tok]):
-                newline_set.add(tok)
+        tok = self._tokenizer
 
-        # Fallback – add dedicated newline token if none discovered.
+        newline_set: Set[int] = set()
+
+        try:
+            vocab_size = tok.vocab_size  # type: ignore[attr-defined]
+        except AttributeError:
+            vocab_size = len(tok.get_vocab())  # type: ignore[arg-type]
+
+        # Iterate through the full vocabulary once and cache the result.
+        # Decoding in a tight Python loop is acceptable because this runs at
+        # initialisation time only.
+        for tid in range(vocab_size):
+            try:
+                if "\n" in tok.decode([tid]):
+                    newline_set.add(tid)
+            except Exception:  # pragma: no cover – ignore decode failures
+                continue
+
+        # Ensure at least the canonical encoded newline token is present even
+        # if the scan failed.
         if not newline_set:
             try:
-                nl_enc = self._tokenizer.encode("\n", add_special_tokens=False)
-                if nl_enc:
-                    newline_set.add(nl_enc[0])
+                enc = tok.encode("\n", add_special_tokens=False)
+                if enc:
+                    newline_set.add(enc[0])
             except Exception:  # pragma: no cover
                 pass
 
+        self._global_newline_set = newline_set
         return newline_set
 
     # ------------------------------------------------------------------ draft model API compatibility

@@ -1618,6 +1618,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             StaticTextProposer, DEBUG_PREDICTED_OUTPUTS,
         )  # type: ignore
 
+        logger.info(f"In generate_static_text_drafts: {sampled_token_ids}")
+
         assert isinstance(self.drafter, StaticTextProposer)
 
         draft_token_ids: list[list[int]] = []
@@ -1635,22 +1637,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             def _write_debug_yaml(req_id: str, debug_state: dict):
                 try:
+                    n_iters = len(debug_state["iterations"])
+                    logger.info(f"Writing yaml for {n_iters} iterations")
                     base_home = os.getenv("VLLMX_HOME",
                                           os.path.expanduser("~/.vllmx"))
                     log_dir = os.path.join(base_home, "log")
                     os.makedirs(log_dir, exist_ok=True)
                     file_path = os.path.join(log_dir, f"{req_id}.yaml")
-                    if yaml is not None:
-                        # Use safe_dump for security – allow_unicode to preserve newlines.
-                        with open(file_path, "w", encoding="utf-8") as f:
-                            yaml.safe_dump(debug_state,
-                                            f,
-                                            sort_keys=False,
-                                            allow_unicode=True)
-                    else:
-                        # Fall back to repr if PyYAML is missing.
-                        with open(file_path, "w", encoding="utf-8") as f:
-                            f.write(repr(debug_state))
+                    # Use safe_dump for security – allow_unicode to preserve newlines.
+                    with open(file_path, "w", encoding="utf-8") as f:
+                        yaml.safe_dump(debug_state,
+                                        f,
+                                        sort_keys=False,
+                                        allow_unicode=True)
                 except Exception as exc:  # pragma: no cover – best effort only
                     logger.error("Failed to write debug YAML for %s: %s", req_id,
                                  exc)
@@ -1664,6 +1663,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if num_sampled_ids == 0:
                 draft_token_ids.append([])
 
+                logger.warning(f"No sampled ids")
                 if DEBUG_PREDICTED_OUTPUTS:
                     empty_iter = {"note": "no sampled ids"}
 
@@ -1681,6 +1681,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             pred_params = self.requests[req_id].sampling_params.predicted_outputs
             if pred_params is None or not pred_params.has_prediction():
                 draft_token_ids.append([])
+                logger.error(f"No prediction")
                 continue
 
             # Only pass the *output* portion (exclude prompt) to the drafter.
@@ -1702,6 +1703,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # tokenizer and avoid the overhead of encoding inside the v1
                 # worker process.
                 draft_token_ids.append([])
+                logger.error(f"Untokenized")
                 continue
 
             pred_tokens = list(pred_params.predicted_token_ids)
@@ -1716,8 +1718,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             start = time.time() if DEBUG_PREDICTED_OUTPUTS else 0.0
 
             if DEBUG_PREDICTED_OUTPUTS:
+                from vllm.v1.spec_decode.static_text_proposer import FlowList  # local import
+
                 debug_iteration = {
-                    "new_tokens": sampled_ids,
+                    "new_tokens": FlowList(sampled_ids),
                     "new_text": tokenizer.decode(sampled_ids)
                     if tokenizer else "",
                 }
@@ -1739,13 +1743,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             draft_token_ids.append(proposed_list)
 
-            # Finalise debug logging for this iteration.
+            # Finalize debug logging for this iteration.
             if DEBUG_PREDICTED_OUTPUTS and debug_iteration is not None:
-                debug_iteration["predicted_tokens"] = proposed_list
-                debug_iteration["predicted_text"] = (
-                    tokenizer.decode(proposed_list) if tokenizer else ""
-                )
+                proposed_text = tokenizer.decode(proposed_list) if tokenizer else ""
+                from vllm.v1.spec_decode.static_text_proposer import FlowList  # local import
+
+                debug_iteration["predicted_tokens"] = FlowList(proposed_list)
+                debug_iteration["predicted_text"] = proposed_text
                 debug_iteration["duration"] = duration
+
+                logger.info(f"Predicted text: {proposed_text}")
 
                 # Retrieve per-request debug_state that StaticTextProposer
                 # maintains and ensure the iteration dict reference is already
@@ -1753,6 +1760,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 try:
                     st = self.drafter._state[req_id]  # type: ignore[attr-defined]
                     debug_state = st.debug_state  # noqa: SLF001 – internal attr
+                    if debug_state is not None and debug_iteration not in debug_state["iterations"]:
+                        debug_state["iterations"].append(debug_iteration)
                     if debug_state is not None:
                         # YAML write-out.
                         _write_debug_yaml(req_id, debug_state)
