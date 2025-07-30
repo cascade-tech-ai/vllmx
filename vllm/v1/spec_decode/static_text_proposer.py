@@ -34,6 +34,8 @@ import numpy as np
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
+import time
+
 # ---------------------------------------------------------------------------
 # YAML helper – ensure *inner* token lists are emitted in **flow** style so
 # that each list appears on a single line: ``[1, 2, 3]``.  We do this by
@@ -68,7 +70,7 @@ except ModuleNotFoundError:  # pragma: no cover – YAML optional for production
 # actual file-write so that the log entry can include the overall iteration
 # latency.
 
-DEBUG_PREDICTED_OUTPUTS = True  # noqa: N816 – global constant by design
+DEBUG_PREDICTED_OUTPUTS = False
 
 # ---------------------------------------------------------------------------
 # Optional high-performance diff library *rapidfuzz*.
@@ -305,12 +307,16 @@ class StaticTextProposer:
         if not predicted_token_ids:
             return None
 
+        propose_start = time.time()
+
         # Initialise request state on first call.
         if req_id not in self._state:
+            start = time.time()
             newline_set: Set[int] = self._detect_newline_tokens(predicted_token_ids)
             self._state[req_id] = _ReqState(list(predicted_token_ids), newline_set)
+            logger.info(f"  Created _ReqState: {(time.time() - start) * 1000:0.2f}ms")
 
-        st = self._state[req_id]
+        st = self._state[req_id]    
 
         ctx_tokens = context_token_ids.tolist()
 
@@ -355,13 +361,11 @@ class StaticTextProposer:
         # is crucial when investigating why alignment fails in production.
         # ------------------------------------------------------------------
 
-        success = True
-
+        start = time.time()
         line_cursor = _align_cursor_lines(st.predicted_line_tuples, completed)
-        if line_cursor is None or line_cursor >= len(st.predicted_line_tuples):
-            success = False
+        logger.info(f"  _align_cursor_lines: {(time.time() - start) * 1000:0.2f}ms")
 
-        if success:
+        if line_cursor and line_cursor < len(st.predicted_line_tuples):
             pred_line_start = st.line_starts[line_cursor]
 
             # Build predicted line tokens for the *current* line.
@@ -374,12 +378,10 @@ class StaticTextProposer:
             if current_prefix != pred_line_tokens[:len(current_prefix)]:
                 success = False
 
-        if success:
             token_cursor = pred_line_start + len(current_prefix)
             if token_cursor >= len(st.predicted_tokens):
                 success = False
 
-        if success:
             end = min(token_cursor + self.k, len(st.predicted_tokens))
             arr = np.array(st.predicted_tokens[token_cursor:end], dtype=np.int32)
         else:
@@ -435,6 +437,8 @@ class StaticTextProposer:
             # shared so we are safe.
             st.debug_state["iterations"].append(debug_iteration)
 
+        logger.info(f"  Proposed {arr.size} tokens in {(time.time() - propose_start) * 1000:0.2f}ms")
+
         return arr if arr.size > 0 else None
 
     # ------------------------------------------------------------------ internal helpers
@@ -449,6 +453,8 @@ class StaticTextProposer:
 
         if self._global_newline_set is not None:
             return self._global_newline_set
+
+        start = time.time()
 
         # Lazily load tokenizer.
         if self._tokenizer is None:
@@ -485,6 +491,8 @@ class StaticTextProposer:
                     newline_set.add(enc[0])
             except Exception:  # pragma: no cover
                 pass
+
+        logger.info(f"  _detect_newline_tokens: {(time.time() - start) * 1000:.2f}")
 
         self._global_newline_set = newline_set
         return newline_set

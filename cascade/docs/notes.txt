@@ -1,3 +1,14 @@
 python3 -m vllm.entrypoints.openai.api_server --model RedHatAI/Llama-3.2-1B-Instruct-FP8 --gpu-memory-utilization 0.8 --served-model-name llama-1b --speculative-config '{"method":"static_text","num_speculative_tokens":32}'
 
 python3 -m vllm.entrypoints.openai.api_server --model RedHatAI/Mistral-Small-3.1-24B-Instruct-2503-FP8-dynamic --gpu-memory-utilization 0.9 --served-model-name mistral-small-3.2 --speculative-config '{"method":"static_text","num_speculative_tokens":32}'
+
+
+docker run --gpus all \
+  -e HF_HOME=/workspace/hf \
+  -v /home/alvion/.cache/huggingface:/workspace/hf \
+  -p 8000:8000 \
+  docker.io/alvion427/vllmx-openai:v0002 \
+  --model RedHatAI/Llama-3.2-1B-Instruct-FP8 \
+  --gpu-memory-utilization 0.8 \
+  --served-model-name llama-1b \
+  --speculative-config '{"method":"static_text","num_speculative_tokens":32}'

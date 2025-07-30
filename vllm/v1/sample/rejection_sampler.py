@@ -5,15 +5,10 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-
-from vllm.logger import init_logger
-logger = init_logger(__name__)
-logger.setLevel("DEBUG")
 
 PLACEHOLDER_TOKEN_ID: tl.constexpr = -1
 GREEDY_TEMPERATURE: tl.constexpr = -1
@@ -231,8 +226,6 @@ def rejection_sample(
         NO_DRAFT_PROBS=draft_probs is None,
         num_warps=1,
     )
-
-    logger.info(f"Accepted {len(output_token_ids)} tokens: {output_token_ids.tolist()}")
 
     return output_token_ids
 

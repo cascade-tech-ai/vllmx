@@ -9,8 +9,7 @@
 #       -t vllmx-openai --target vllmx-openai .
 # -----------------------------------------------------------------------------
 
-# Pin to the desired vLLM release (GPU / CUDA build)
-# Change the tag here if you need a different upstream version.
+# Pin to the desired vLLM release (GPU / CUDA build)# Change the tag here if you need a different upstream version.
 FROM vllm/vllm-openai:v0.9.1 AS vllmx-openai
 
 # Skip kernel compilation; reuse upstream pre-built wheel.

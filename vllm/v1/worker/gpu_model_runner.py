@@ -1655,6 +1655,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                  exc)
 
         for i, sampled_ids in enumerate(sampled_token_ids):
+            start = time.time()
+
             # Skip requests that sampled no tokens in this step.
             num_sampled_ids = len(sampled_ids)
 
@@ -1715,7 +1717,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # ------------------------------------------------------------------
 
             debug_iteration: dict | None = None
-            start = time.time() if DEBUG_PREDICTED_OUTPUTS else 0.0
 
             if DEBUG_PREDICTED_OUTPUTS:
                 from vllm.v1.spec_decode.static_text_proposer import FlowList  # local import
@@ -1733,8 +1734,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 debug_iteration=debug_iteration,
             )
 
-            duration = (time.time() - start) if DEBUG_PREDICTED_OUTPUTS else 0.0
-
             # Convert drafter output to list for downstream code.
             if drafter_output is None:
                 proposed_list: list[int] = []
@@ -1742,6 +1741,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 proposed_list = drafter_output.tolist()
 
             draft_token_ids.append(proposed_list)
+
+            duration = (time.time() - start)
+            logger.info(f"Predicted {len(proposed_list)} tokens in {duration * 1000:.2f}ms")
 
             # Finalize debug logging for this iteration.
             if DEBUG_PREDICTED_OUTPUTS and debug_iteration is not None:
@@ -1752,7 +1754,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 debug_iteration["predicted_text"] = proposed_text
                 debug_iteration["duration"] = duration
 
-                logger.info(f"Predicted text: {proposed_text}")
+                #logger.info(f"Predicted text: {proposed_text}")
 
                 # Retrieve per-request debug_state that StaticTextProposer
                 # maintains and ensure the iteration dict reference is already
