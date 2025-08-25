@@ -112,6 +112,10 @@ class UsageInfo(OpenAIBaseModel):
     total_tokens: int = 0
     completion_tokens: Optional[int] = 0
     prompt_tokens_details: Optional[PromptTokenUsageInfo] = None
+    # vLLM extension: number of accepted speculative (predicted) tokens.
+    # Present when speculative decoding is enabled and the backend collects
+    # acceptance counts. Not part of the upstream OpenAI schema.
+    spec_predicted_tokens: Optional[int] = None
 
 
 class RequestResponseMetadata(BaseModel):
