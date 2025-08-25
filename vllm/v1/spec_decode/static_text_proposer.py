@@ -1,27 +1,16 @@
 """Speculative *static-text* proposer (v1).
 
-This file is now the **single source of truth** for the static-text
-speculative-decoding logic used by vLLM.  The legacy v0
-``vllm.spec_decode.static_text_worker.StaticTextWorker`` delegates to the
-helpers defined here so that future maintenance only needs to touch this
-module.
+Single source of truth for static-text speculative-decoding logic used by
+vLLM. The legacy v0 worker delegates to helpers defined here.
 
 Highlights
 ----------
-1. Robust *line-level* alignment of the **generated context** with the
-   **user-supplied prediction**.  Two interchangeable algorithms are provided:
-
-   • rapidfuzz (fast, optional dependency)
-   • difflib   (C-accelerated stdlib fallback)
-
+1. Robust line-level alignment of the generated context with the
+   user‑supplied prediction using RapidFuzz (optional) or difflib.
 2. Incremental per-request state to avoid re-processing the entire context.
+3. Per-request predictions from ``SamplingParams.predicted_outputs`` only.
 
-3. No reliance on *global* predictions configured at worker creation – the
-   only source for predicted text/tokens is the
-   ``SamplingParams.predicted_outputs`` field passed alongside each request.
-
-The implementation is purposely **pure Python / NumPy** so that it can run on
-the CPU worker process without touching GPU memory.
+Implementation uses pure Python/NumPy on CPU.
 """
 
 from __future__ import annotations
@@ -35,42 +24,6 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
 import time
-
-# ---------------------------------------------------------------------------
-# YAML helper – ensure *inner* token lists are emitted in **flow** style so
-# that each list appears on a single line: ``[1, 2, 3]``.  We do this by
-# defining a lightweight ``FlowList`` subtype with a custom representer.
-# ---------------------------------------------------------------------------
-
-try:
-    import yaml  # type: ignore
-
-    class FlowList(list):
-        """Marker subclass – dumped using YAML *flow* style."""
-
-    def _represent_flow_seq(dumper: yaml.Dumper, data: list):  # type: ignore[name-defined]
-        return dumper.represent_sequence(
-            "tag:yaml.org,2002:seq", data, flow_style=True)
-
-    yaml.SafeDumper.add_representer(FlowList, _represent_flow_seq)  # type: ignore[attr-defined]
-
-except ModuleNotFoundError:  # pragma: no cover – YAML optional for production
-
-    class FlowList(list):  # type: ignore[empty-body]
-        pass
-
-# ---------------------------------------------------------------------------
-# Development / debugging switches
-# ---------------------------------------------------------------------------
-
-# When set to True the StaticTextProposer will cooperate with the
-# gpu_model_runner to emit a *structured* YAML debug log (see
-# `cascade/docs/debug_logging.txt`).  The drafter only gathers pieces of
-# information that are *easy* for it to compute – the GPU runner owns the
-# actual file-write so that the log entry can include the overall iteration
-# latency.
-
-DEBUG_PREDICTED_OUTPUTS = False
 
 # ---------------------------------------------------------------------------
 # Optional high-performance diff library *rapidfuzz*.
@@ -110,8 +63,6 @@ class _ReqState:
         "ctx_line_tuples",
         "current_line_tokens",
         # optional debug fields
-        "debug_state",
-        "_debug_prev_completed_len",
     )
 
     def __init__(self, predicted_tokens: List[int], newline_set: Set[int]):
@@ -132,14 +83,7 @@ class _ReqState:
         self.ctx_line_tuples: List[Tuple[int, ...]] = []
         self.current_line_tokens: List[int] = []
 
-        # ------------------------------------------------------------------
-        # Debug helpers – initialised lazily on first access when debugging is
-        # enabled.  The structure follows the design in
-        # `cascade/docs/debug_logging.txt`.
-        # ------------------------------------------------------------------
-
-        self.debug_state: dict | None = None
-        self._debug_prev_completed_len: int = 0
+        # (no additional debug state)
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +244,6 @@ class StaticTextProposer:
         req_id: str,
         context_token_ids: np.ndarray,
         predicted_token_ids: Optional[List[int]],
-        debug_iteration: Optional[dict] = None,
     ) -> Optional[np.ndarray]:
         """Return next speculative tokens for *req_id* if prediction matches."""
 
@@ -350,10 +293,6 @@ class StaticTextProposer:
             completed = st.ctx_line_tuples
             current_prefix = list(st.current_line_tokens)
 
-        predicted_lines_text = [self._tokenizer.decode(l) for l in st.predicted_line_tuples]
-        completed_lines_text = [self._tokenizer.decode(l) for l in completed]
-
-
         # ------------------------------------------------------------------
         # Attempt alignment between *completed* context lines and the global
         # prediction. Instead of returning early on failure we record the
@@ -389,53 +328,6 @@ class StaticTextProposer:
 
         logger.info(f"Context:\n" + "".join(self._tokenizer.decode(t) for t in st.ctx_line_tuples))
         logger.info(f"Predicted {len(arr)} tokens: {self._tokenizer.decode(arr)}")
-
-        # ------------------------------------------------------------------
-        # Optional debug collection – augment the provided *mutable* dict so
-        # that the caller (gpu_model_runner) can add timing information and
-        # write the combined structure out to disk.
-        # ------------------------------------------------------------------
-
-        if DEBUG_PREDICTED_OUTPUTS and debug_iteration is not None:
-            # Lazily initialise the per-request debug_state once we have a
-            # tokenizer to decode the prediction.
-            if st.debug_state is None:
-                st.debug_state = {
-                    "predicted_lines_tokens": [FlowList(t) for t in st.predicted_line_tuples],
-                    "predicted_lines_text": predicted_lines_text,
-                    "iterations": [],
-                }
-
-            # Newly completed *context* lines since the previous iteration.
-            prev_len = st._debug_prev_completed_len
-            new_completed = completed[prev_len:]
-            st._debug_prev_completed_len = len(completed)
-
-            debug_iteration["new_context_lines_tokens"] = [FlowList(t) for t in new_completed]
-            debug_iteration["new_context_lines_text"] = [
-                self._tokenizer.decode(t) for t in new_completed
-            ]
-
-            # Current *in-progress* prefix (may be empty when context ends with
-            # a newline).
-            debug_iteration["current_prefix_tokens"] = FlowList(current_prefix)
-            debug_iteration["current_prefix_text"] = self._tokenizer.decode(
-                current_prefix) if current_prefix else ""
-
-            # Proposer output – will be overwritten by caller *after* the
-            # duration is measured so we only set a default here.
-            if arr.size > 0:
-                debug_iteration.setdefault("predicted_tokens", FlowList(arr.tolist()))
-                debug_iteration.setdefault("predicted_text",
-                                            self._tokenizer.decode(arr))
-            else:
-                debug_iteration.setdefault("predicted_tokens", FlowList())
-                debug_iteration.setdefault("predicted_text", "")
-
-            # Finally append to the iterations list – the caller may still
-            # mutate duration / predicted_{tokens,text} but the reference is
-            # shared so we are safe.
-            st.debug_state["iterations"].append(debug_iteration)
 
         logger.info(f"  Proposed {arr.size} tokens in {(time.time() - propose_start) * 1000:0.2f}ms")
 

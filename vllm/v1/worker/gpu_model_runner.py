@@ -1615,7 +1615,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """
         # Import here to avoid heavy dependency at module import time.
         from vllm.v1.spec_decode.static_text_proposer import (
-            StaticTextProposer, DEBUG_PREDICTED_OUTPUTS,
+            StaticTextProposer,
         )  # type: ignore
 
         logger.info(f"In generate_static_text_drafts: {sampled_token_ids}")
@@ -1626,33 +1626,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         tokenizer = getattr(self.drafter, "_tokenizer", None)
 
-        # Helper to write YAML debug logs *after* each iteration when the
-        # DEBUG_PREDICTED_OUTPUTS switch is enabled.
-        if DEBUG_PREDICTED_OUTPUTS:
-            import os
-            try:
-                import yaml  # type: ignore
-            except ModuleNotFoundError:  # pragma: no cover – debug only
-                yaml = None  # type: ignore
-
-            def _write_debug_yaml(req_id: str, debug_state: dict):
-                try:
-                    n_iters = len(debug_state["iterations"])
-                    logger.info(f"Writing yaml for {n_iters} iterations")
-                    base_home = os.getenv("VLLMX_HOME",
-                                          os.path.expanduser("~/.vllmx"))
-                    log_dir = os.path.join(base_home, "log")
-                    os.makedirs(log_dir, exist_ok=True)
-                    file_path = os.path.join(log_dir, f"{req_id}.yaml")
-                    # Use safe_dump for security – allow_unicode to preserve newlines.
-                    with open(file_path, "w", encoding="utf-8") as f:
-                        yaml.safe_dump(debug_state,
-                                        f,
-                                        sort_keys=False,
-                                        allow_unicode=True)
-                except Exception as exc:  # pragma: no cover – best effort only
-                    logger.error("Failed to write debug YAML for %s: %s", req_id,
-                                 exc)
+        # Structured YAML debug logging removed.
 
         for i, sampled_ids in enumerate(sampled_token_ids):
             start = time.time()
@@ -1660,21 +1634,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Skip requests that sampled no tokens in this step.
             num_sampled_ids = len(sampled_ids)
 
-            # If the model produced no new tokens record an empty iteration so
-            # that the debug timeline remains contiguous.
             if num_sampled_ids == 0:
                 draft_token_ids.append([])
-
                 logger.warning(f"No sampled ids")
-                if DEBUG_PREDICTED_OUTPUTS:
-                    empty_iter = {"note": "no sampled ids"}
-
-                    if hasattr(self.drafter, "_state"):
-                        st = self.drafter._state.get(self.input_batch.req_ids[i], None)  # type: ignore[attr-defined]
-                        if st and st.debug_state is not None:  # noqa: SLF001
-                            st.debug_state["iterations"].append(empty_iter)
-                            _write_debug_yaml(self.input_batch.req_ids[i], st.debug_state)
-
                 continue
 
             req_id = self.input_batch.req_ids[i]
@@ -1710,28 +1672,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             pred_tokens = list(pred_params.predicted_token_ids)
 
-            # ------------------------------------------------------------------
-            # Optional structured debug logging – record timings and let the
-            # StaticTextProposer enrich the iteration dict with *context*-based
-            # fields.
-            # ------------------------------------------------------------------
-
-            debug_iteration: dict | None = None
-
-            if DEBUG_PREDICTED_OUTPUTS:
-                from vllm.v1.spec_decode.static_text_proposer import FlowList  # local import
-
-                debug_iteration = {
-                    "new_tokens": FlowList(sampled_ids),
-                    "new_text": tokenizer.decode(sampled_ids)
-                    if tokenizer else "",
-                }
-
             drafter_output = self.drafter.propose(
                 req_id=req_id,
                 context_token_ids=context_ids,
                 predicted_token_ids=pred_tokens,
-                debug_iteration=debug_iteration,
             )
 
             # Convert drafter output to list for downstream code.
@@ -1745,31 +1689,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             duration = (time.time() - start)
             logger.info(f"Predicted {len(proposed_list)} tokens in {duration * 1000:.2f}ms")
 
-            # Finalize debug logging for this iteration.
-            if DEBUG_PREDICTED_OUTPUTS and debug_iteration is not None:
-                proposed_text = tokenizer.decode(proposed_list) if tokenizer else ""
-                from vllm.v1.spec_decode.static_text_proposer import FlowList  # local import
-
-                debug_iteration["predicted_tokens"] = FlowList(proposed_list)
-                debug_iteration["predicted_text"] = proposed_text
-                debug_iteration["duration"] = duration
-
-                #logger.info(f"Predicted text: {proposed_text}")
-
-                # Retrieve per-request debug_state that StaticTextProposer
-                # maintains and ensure the iteration dict reference is already
-                # appended.
-                try:
-                    st = self.drafter._state[req_id]  # type: ignore[attr-defined]
-                    debug_state = st.debug_state  # noqa: SLF001 – internal attr
-                    if debug_state is not None and debug_iteration not in debug_state["iterations"]:
-                        debug_state["iterations"].append(debug_iteration)
-                    if debug_state is not None:
-                        # YAML write-out.
-                        _write_debug_yaml(req_id, debug_state)
-                except Exception as exc:  # pragma: no cover – best effort
-                    logger.error("Failed to finalize debug log for %s: %s", req_id,
-                                 exc)
+            # Structured YAML debug logging removed.
 
         return draft_token_ids
 
