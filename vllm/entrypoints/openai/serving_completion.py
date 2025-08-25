@@ -508,19 +508,6 @@ class OpenAIServingCompletion(OpenAIServing):
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
         )
-        # Include total accepted speculative (predicted) tokens when available.
-        try:
-            total_predicted = 0
-            for final_res in final_res_batch:
-                metrics = getattr(final_res, "metrics", None)
-                counts = getattr(metrics, "spec_token_acceptance_counts", None)
-                if counts and len(counts) > 1:
-                    total_predicted += int(sum(counts[1:]))
-            if total_predicted > 0:
-                usage.spec_predicted_tokens = total_predicted
-        except Exception:
-            # Do not fail the request on metrics aggregation errors.
-            pass
 
         request_metadata.final_usage_info = usage
 

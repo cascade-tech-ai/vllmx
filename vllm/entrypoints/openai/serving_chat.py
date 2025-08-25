@@ -1102,11 +1102,6 @@ class OpenAIServingChat(OpenAIServing):
                           completion_tokens=num_generated_tokens,
                           total_tokens=num_prompt_tokens +
                           num_generated_tokens)
-        # Include total accepted speculative (predicted) tokens when available.
-        if final_res.metrics and final_res.metrics.spec_token_acceptance_counts:
-            counts = final_res.metrics.spec_token_acceptance_counts
-            if counts and len(counts) > 1:
-                usage.spec_predicted_tokens = int(sum(counts[1:]))
         if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
             usage.prompt_tokens_details = PromptTokenUsageInfo(
                 cached_tokens=final_res.num_cached_tokens)
