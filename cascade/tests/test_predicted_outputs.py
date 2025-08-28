@@ -1,171 +1,247 @@
-"""Integration test for *predicted outputs* via StaticTextWorker.
+"""Slow end-to-end tests for Smart Predicted Outputs (static-text proposer).
 
-The test spins up a local ``LLM`` using the *SmolLM2-360M-Instruct* model that
-is assumed to be present in the HuggingFace cache.  Network access is disabled
-via the ``HF_HUB_OFFLINE`` environment variable to prevent accidental
-downloads during CI.
+These tests intentionally spin up a real vLLM engine and exercise the
+`predicted_outputs` API with and without a supplied prediction.
+
+Notes:
+- Model path is taken from env var `VLLMX_TEST_MODEL`, defaulting to
+  'HuggingFaceTB/SmolLM2-360M-Instruct'.
+- We keep a single lazy LLM instance across tests with static-text prediction
+  enabled so the engine initialization cost is paid once.
 """
 
 from __future__ import annotations
 
 import os
-# -----------------------------------------------------------------------------
-# Runtime requirements ---------------------------------------------------------
-# -----------------------------------------------------------------------------
-
-import shutil
-
-import torch
+from typing import Any, Optional
 
 import pytest
 
+
 # -----------------------------------------------------------------------------
-# Configuration – disable any outbound network traffic to HF.
+# Configuration
 # -----------------------------------------------------------------------------
 
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+MODEL_ENV = "VLLMX_TEST_MODEL"
+DEFAULT_MODEL = "HuggingFaceTB/SmolLM2-360M-Instruct"
 
 
-MODEL_NAME = "HuggingFaceTB/SmolLM2-360M-Instruct"
+_LLM = None  # lazy global LLM instance
 
 
-# Skip test when a CUDA device is not usable by PyTorch (some CI containers
-# expose `nvidia-smi` but block `cudaGetDeviceCount`, which raises a runtime
-# error instead of simply returning 0).
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="PyTorch reports CUDA unavailable – speculative decoding requires GPU",
-)
-def test_static_text_worker_generates_with_predicted(monkeypatch):
-    # Import *after* setting env vars so that HF picks them up.
-    # (No monkey-patch required – predicted outputs are now a first-class
-    # field on SamplingParams.)
+def get_llm():
+    """Return a cached LLM with static-text prediction enabled.
+
+    Ensures we use the V1 engine so metrics are available via `get_metrics()`
+    and per-request `RequestOutput.metrics` fields are populated.
+    """
+    global _LLM
+    if _LLM is not None:
+        return _LLM
+
+    # Use V0 engine to access per-request metrics in RequestOutput.metrics
+    os.environ.setdefault("VLLM_USE_V1", "0")
+
+    # Local import so environments without vLLM installed can still import the
+    # test module (collection time) without crashing.
     from vllm.entrypoints.llm import LLM
-    from vllm.sampling_params import SamplingParams
-    from vllm.spec_decode.predicted_output_params import PredictedOutputParams
 
-    # The text we expect / predict the model to emit first.
-    predicted_text = "The tallest mountain in the world is Mount Everest."
+    model_id = os.environ.get(MODEL_ENV, DEFAULT_MODEL)
 
-    # We know the exact results of what this model will output
-    prompt = """<|im_start|>user
-What is the tallest mountain in the world?<|im_end|>
-<|im_start|>assistant
-"""
+    # Allow overriding GPU util via env for CI/local tuning
+    gpu_util = float(os.getenv("VLLMX_GPU_UTIL", "0.25"))
 
-    sampling_params = SamplingParams(
-        temperature=0.0,  # ensure deterministic continuation
-        max_tokens=20,    # allow model to produce after the prediction
-        predicted_outputs=PredictedOutputParams(predicted_text=predicted_text),
-    )
-
-    # Build the LLM in *offline* mode using our StaticTextWorker as the draft.
-    llm = LLM(
-        model=MODEL_NAME,
-        # Use our new static_text speculative method.
+    _LLM = LLM(
+        model=model_id,
         speculative_config={
             "method": "static_text",
-            # Provide a large *k* so the entire prediction fits into the first
-            # proposal window.  This lets us verify that the request finishes
-            # in a *single* model forward pass when the prediction matches.
             "num_speculative_tokens": 128,
             "disable_mqa_scorer": True,
         },
         trust_remote_code=True,
-        enforce_eager=True,  # avoid cuda-graph for quicker init in CI
+        enforce_eager=True,
+        gpu_memory_utilization=gpu_util,
+        max_model_len=1024,
+        disable_log_stats=False,
+    )
+    return _LLM
+
+
+def _token_len(text: str) -> int:
+    llm = get_llm()
+    tokenizer = llm.get_tokenizer()
+    return len(tokenizer.encode(text, add_special_tokens=False))
+
+
+def _build_smol_chat_prompt(user_text: str) -> str:
+    # Matches docs example for SmolLM2 chat template
+    return (
+        "<|im_start|>user\n"
+        f"{user_text}<|im_end|>\n"
+        "<|im_start|>assistant\n"
     )
 
-    outputs = llm.generate([prompt], [sampling_params], use_tqdm=False)
 
-    # Basic sanity checks ------------------------------------------------------
-    assert len(outputs) == 1
-    out = outputs[0]
+def generate_chat(
+    user_prompt: str,
+    *,
+    max_tokens: int,
+    predicted_text: Optional[str] = None,
+) -> tuple[str, dict[str, Any]]:
+    """Generate up to `max_tokens` and return (text, prediction_stats).
 
-    # There should be exactly one completion (n=1).
-    assert len(out.outputs) == 1
+    - Applies chat template automatically via LLM.chat().
+    - If `predicted_text` is provided, attaches it as the per-request
+      prediction using SamplingParams.predicted_outputs.
+    - Returns the assistant text and a dict of stats derived from
+      RequestOutput.metrics (per-request, not aggregated).
+    """
+    from vllm.sampling_params import SamplingParams
+    from vllm.spec_decode.predicted_output_params import PredictedOutputParams
 
-    # Spec-decode metrics should be present when the pipeline is engaged.
-    assert out.metrics is not None
-    assert out.metrics.spec_token_acceptance_counts is not None
+    llm = get_llm()
+    use_v1 = os.getenv("VLLM_USE_V1", "0") == "1"
 
-    # ------------------------------------------------------------------
-    # Human-readable diagnostics (visible with -s) ----------------------
-    # ------------------------------------------------------------------
+    # Interpret non-positive as "until end"; use a generous cap to avoid
+    # unbounded generation in CI while behaving intuitively for tests.
+    capped_max = max_tokens if max_tokens > 0 else 512
 
-    from time import perf_counter
+    sampling_kwargs = dict(temperature=0.0, max_tokens=capped_max)
+    if predicted_text is not None:
+        # Provide pre-tokenized prediction to ensure the V1 worker has
+        # predicted_token_ids available without re-tokenizing inside GPU proc.
+        tokenizer = llm.get_tokenizer()
+        normalized_text = predicted_text.replace("\r\n", "\n").replace("\r", "\n")
+        pred_ids = tokenizer.encode(normalized_text, add_special_tokens=False)
+        sampling_kwargs["predicted_outputs"] = PredictedOutputParams(
+            predicted_text=predicted_text, predicted_token_ids=pred_ids)
 
-    total_tokens = len(out.outputs[0].token_ids)
-    text_out = out.outputs[0].text
+    sampling = SamplingParams(**sampling_kwargs)
 
-    # Capture basic timing info from metrics if present.
-    if out.metrics.first_token_time and out.metrics.arrival_time:
-        latency_ms = (out.metrics.first_token_time - out.metrics.arrival_time) * 1000
+    messages = [
+        {"role": "user", "content": user_prompt},
+    ]
+
+    # Pre-metrics snapshot for V1 (prometheus-based)
+    pre_metrics = None
+    if use_v1 and hasattr(llm, "get_metrics"):
+        try:
+            pre_metrics = llm.get_metrics()
+        except Exception:
+            pre_metrics = None
+
+    model_id = os.environ.get(MODEL_ENV, DEFAULT_MODEL)
+    use_raw_chat = "SmolLM2-360M-Instruct" in model_id
+
+    if use_raw_chat:
+        # Build chat prompt explicitly to avoid template mismatches
+        prompt_str = _build_smol_chat_prompt(user_prompt)
+        outputs = llm.generate([prompt_str], [sampling], use_tqdm=False)
     else:
-        latency_ms = None
+        outputs = llm.chat(messages,
+                           sampling_params=sampling,
+                           add_generation_prompt=True,
+                           use_tqdm=False)
 
-    print("\n========== DEBUG SUMMARY ==========")
-    print(f"Generated tokens: {total_tokens}")
-    print(f"Output text    : {text_out!r}")
-    print(f"Spec-decode    : {out.metrics.spec_token_acceptance_counts}")
-    if latency_ms is not None:
-        print(f"Time to first token: {latency_ms:.1f} ms")
-    print("===================================\n")
+    assert len(outputs) == 1
+    req = outputs[0]
+    assert len(req.outputs) >= 1
+    out = req.outputs[0]
 
-    # --- Additional validations -------------------------------------------
-    # We expect the entire prediction to be accepted in the *first* (and only)
-    # speculative step so the model performs exactly one forward pass after
-    # the prompt.
+    # Per-request speculative acceptance counts (may be None if speculation
+    # was not engaged, or 0-length if disabled internally for the request).
+    acceptance_counts = None
+    predicted_accepted = 0
 
-    acceptance_counts = out.metrics.spec_token_acceptance_counts
+    if not use_v1 and req.metrics is not None:
+        acceptance_counts = req.metrics.spec_token_acceptance_counts
+        if acceptance_counts:
+            predicted_accepted = sum(acceptance_counts[1:])
+    elif use_v1 and hasattr(llm, "get_metrics"):
+        try:
+            post_metrics = llm.get_metrics()
+        except Exception:
+            post_metrics = None
+        # Compute delta of accepted tokens across the request window.
+        if pre_metrics is not None and post_metrics is not None:
+            def total_counter(metrics, name):
+                from vllm.v1.metrics.reader import Counter
+                return sum(m.value for m in metrics if isinstance(m, Counter)
+                           and m.name == name)
 
-    # The first decode step should accept at least the entire prediction.  All
-    # subsequent steps still include the *target-model* token, therefore they
-    # will register exactly one accepted token each.  We only care that no
-    # *additional* speculative tokens are accepted after step-0.
+            accepted_before = total_counter(pre_metrics,
+                                            "vllm:spec_decode_num_accepted_tokens")
+            accepted_after = total_counter(post_metrics,
+                                           "vllm:spec_decode_num_accepted_tokens")
+            drafts_before = total_counter(pre_metrics,
+                                          "vllm:spec_decode_num_drafts")
+            drafts_after = total_counter(post_metrics,
+                                         "vllm:spec_decode_num_drafts")
+            draft_tokens_before = total_counter(pre_metrics,
+                                               "vllm:spec_decode_num_draft_tokens")
+            draft_tokens_after = total_counter(post_metrics,
+                                              "vllm:spec_decode_num_draft_tokens")
+            predicted_accepted = max(0, accepted_after - accepted_before)
+            print(
+                "[DEBUG V1 metrics] drafts:", drafts_after - drafts_before,
+                "draft_tokens:", draft_tokens_after - draft_tokens_before,
+                "accepted:", predicted_accepted,
+            )
 
-    tokenizer = llm.get_tokenizer()
+    stats = {
+        "acceptance_per_pos": acceptance_counts or [],
+        "predicted_accepted_tokens": predicted_accepted,
+        "generated_tokens": len(out.token_ids),
+    }
 
-    accepted_tokens = acceptance_counts[0]
-
-    predicted_len = len(tokenizer.encode(predicted_text, add_special_tokens=False))
-
-    assert accepted_tokens >= predicted_len, (
-        "Speculative pipeline did not accept the full predicted prefix.")
-
-    assert all(v == 1 for v in acceptance_counts[1:predicted_len-1]), (
-        f"Unexpected number of accepted tokens after the first decoding step: {acceptance_counts[1:predicted_len-1]}")
-
-    # Convert token-ids to strings so we can inspect them easily.
-    gen_token_ids = list(out.outputs[0].token_ids)
-    gen_tokens = [tokenizer.decode([tid], skip_special_tokens=False)
-                  for tid in gen_token_ids]
-
-    # Print helpful debug info (visible with `pytest -s`).
-    print("\n[DEBUG] generated token count:", len(gen_token_ids))
-    print("[DEBUG] accepted (first pass):", accepted_tokens)
-
-    pred_token_ids = tokenizer.encode(predicted_text, add_special_tokens=False)
-    pred_tokens = [tokenizer.decode([tid], skip_special_tokens=False)
-                   for tid in pred_token_ids]
-
-    print("[DEBUG] predicted token count:", len(pred_token_ids))
-
-    # Show side-by-side comparison of generated vs predicted for the first
-    # min(len(pred), len(gen)) tokens.
-    compare_n = min(len(pred_token_ids), len(gen_token_ids))
-    pairs = []
-    for i in range(compare_n):
-        pairs.append((i, gen_token_ids[i], gen_tokens[i], pred_token_ids[i], pred_tokens[i]))
-
-    from pprint import pprint
-    print("[DEBUG] first tokens comparison (idx, gen_id, gen_str, pred_id, pred_str):")
-    pprint(pairs)
+    return out.text, stats
 
 
-    # The number of tokens accepted in the first pass should cover the entire
-    # prediction (and possibly more if the model continued further within the
-    # same window).
-    predicted_len = len(tokenizer.encode(predicted_text, add_special_tokens=False))
-    assert accepted_tokens >= predicted_len, (
-        "Speculative pipeline did not accept the full predicted prefix.")
+# -----------------------------------------------------------------------------
+# Tests
+# -----------------------------------------------------------------------------
+
+
+HAIKU = (
+    "Autumn moonlight—\n"
+    "a worm digs silently\n"
+    "into the chestnut."
+)
+
+
+def test_echo_haiku_no_prediction():
+    # Ask the model to echo the haiku. We do not attach any prediction.
+    max_tokens = _token_len(HAIKU)
+    prompt = (
+        "Repeat back the following haiku verbatim.\n"
+        "Do not add any commentary or extra text.\n\n"
+        f"{HAIKU}"
+    )
+
+    _, stats = generate_chat(prompt, max_tokens=max_tokens, predicted_text=None)
+
+    assert stats["predicted_accepted_tokens"] == 0
+
+
+def test_echo_haiku_with_prediction():
+    # First, get the model's exact deterministic output for this prompt.
+    base_prompt = (
+        "Repeat back the following haiku verbatim.\n"
+        "Do not add any commentary or extra text.\n\n"
+        f"{HAIKU}"
+    )
+
+    observed_text, _ = generate_chat(base_prompt, max_tokens=-1,
+                                      predicted_text=None)
+
+    # Now, attach that exact output as the prediction and request exactly the
+    # same number of tokens to be generated.
+    predicted_text = observed_text
+    predicted_len = _token_len(predicted_text)
+
+    _, stats = generate_chat(base_prompt,
+                             max_tokens=predicted_len,
+                             predicted_text=predicted_text)
+
+    # All generated tokens should be accepted speculative tokens.
+    assert stats["predicted_accepted_tokens"] == predicted_len

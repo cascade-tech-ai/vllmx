@@ -4,11 +4,7 @@ Smart Predicted Outputs is OpenAI’s “predicted outputs” concept with smart
 
 ## Why
 
-Modern LLM applications often know part of what the model will output next: boilerplate code, templated headers, structured responses, or a continuation the application already computed. If we can hint those tokens to the model and skip work when they match, we get lower latency and cost without changing model weights.
-
-Two needs emerge:
-- Fast-path exact or near-exact continuations (accept predicted tokens in bulk).
-- Recover alignment after divergences (e.g., a missing stanza, a refactor), resuming useful prediction further down the text.
+Modern LLM applications often know part of what the model will output next: boilerplate code, templated headers, structured responses, or a continuation the application already computed. We can use that knowledge to predict which tokens might come next, and use them as proposals for a speculative decoding system. 
 
 ## What
 
