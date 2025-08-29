@@ -26,6 +26,36 @@ from vllm.logger import init_logger
 import time
 
 # ---------------------------------------------------------------------------
+# Logging configuration.
+# ---------------------------------------------------------------------------
+
+import os
+VERBOSE = os.getenv('PREDICTED_OUTPUTS_VERBOSE') == '1'
+
+logger = init_logger(__name__)
+
+if VERBOSE:
+    logger.setLevel("INFO")
+else:
+    logger.setLevel("WARNING")
+
+# THE PLAN:
+# - Make tests to just test static_text_proposer directly for fast iteration
+# - Write tests:
+#   - Propose nothing, match nothing
+#   - Propose exact, match every token
+#   - Propose partial with a few variations.  They should compare two multi-line bits of text
+#     with some overlap.  Adding/removing lines.
+#
+# - Whether tests pass or not, we need to rewrite this:
+#   - Keep track of current position, and current prediction as offset in prediction.  Starts at 0
+#   - When we get new context, if we have a current prediction (>=0), and new text matches the next
+#     text, then just continue (predict next N tokens)
+#   - We still need to accumulate context into lines
+#   - When prediction doesn't match, we set current prediction to -1 and switch to doing
+#     alignment with every newline (not every time)
+
+# ---------------------------------------------------------------------------
 # Optional high-performance diff library *rapidfuzz*.
 # ---------------------------------------------------------------------------
 
@@ -34,21 +64,11 @@ try:
 
     _RAPIDFUZZ_AVAILABLE = True
 except ModuleNotFoundError:  # pragma: no cover – executed only when missing
-    _RAPIDFUZZ_AVAILABLE = False
-
-# ---------------------------------------------------------------------------
-# Logging configuration.
-# ---------------------------------------------------------------------------
-
-logger = init_logger(__name__)
-if _RAPIDFUZZ_AVAILABLE:
-    logger.setLevel("ERROR")  # stay quiet in production
-else:
-    logger.setLevel("WARNING")
     logger.warning(
         "Optional dependency 'rapidfuzz' not found – falling back to "
         "difflib.SequenceMatcher for static-text alignment.  Install rapidfuzz "
         "for optimal speculative-decoding performance.")
+    _RAPIDFUZZ_AVAILABLE = False
 
 class _ReqState:
     """Mutable per-request state stored inside the proposer."""
@@ -250,6 +270,22 @@ class StaticTextProposer:
         if not predicted_token_ids:
             return None
 
+        # Lazily load tokenizer.
+        if self._tokenizer is None:
+            from transformers import AutoTokenizer  # local import
+
+            model_name_or_path = self.vllm_config.model_config.model  # type: ignore[attr-defined]
+            self._tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, use_fast=True)
+
+        # print token ids and text for context_token_ids and predicted_token_ids
+        logger.info(f"Context token ids: {context_token_ids.tolist()}")
+        logger.info(f"Context text: {self._tokenizer.decode(context_token_ids)}")
+        if predicted_token_ids:
+            logger.info(f"Predicted token ids: {predicted_token_ids}")
+            logger.info(f"Predicted text: {self._tokenizer.decode(predicted_token_ids)}")
+        else:
+            logger.info("No predicted token ids")
+
         propose_start = time.time()
 
         # Initialise request state on first call.
@@ -273,11 +309,6 @@ class StaticTextProposer:
         for tok in ctx_tokens[st.ctx_processed:]:
             st.current_line_tokens.append(tok)
 
-            # The newline set is now *comprehensive* because it is generated
-            # once at startup by exhaustively scanning the full vocabulary in
-            # `_detect_newline_tokens`.  We therefore avoid the previous,
-            # expensive per-token decode that attempted to discover newline
-            # tokens on-the-fly.
             if tok in st.newline_set:
                 st.ctx_line_tuples.append(tuple(st.current_line_tokens))
                 st.current_line_tokens.clear()
@@ -347,13 +378,6 @@ class StaticTextProposer:
             return self._global_newline_set
 
         start = time.time()
-
-        # Lazily load tokenizer.
-        if self._tokenizer is None:
-            from transformers import AutoTokenizer  # local import
-
-            model_name_or_path = self.vllm_config.model_config.model  # type: ignore[attr-defined]
-            self._tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, use_fast=True)
 
         tok = self._tokenizer
 

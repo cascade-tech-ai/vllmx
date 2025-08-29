@@ -33,10 +33,10 @@ import uvloop  # type: ignore
 DEFAULT_ARG_LIST: List[str] = [
     "--enable-prefix-caching",
     "--gpu-memory-utilization", "0.8",
-    "--max-model-len", "65536",
+    "--max-model-len", "8192",
     "--speculative-config",
     '{"method":"static_text","num_speculative_tokens":32}',
-    "--model", "RedHatAI/Llama-3.2-1B-Instruct-FP8",
+    "--model", "HuggingFaceTB/SmolLM2-360M-Instruct",
     "--served-model-name", "predict"
 ]
 
