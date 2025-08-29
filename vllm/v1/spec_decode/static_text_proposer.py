@@ -104,6 +104,8 @@ class _ReqState:
         "ctx_processed",
         "ctx_line_tuples",
         "current_line_tokens",
+        # line ending mode: 'lf' or 'crlf'
+        "line_ending_mode",
         # cursor-based fast path
         "pred_cursor",
         "align_blocked_until_completed_lines",
@@ -131,6 +133,9 @@ class _ReqState:
         # Cursor state
         self.pred_cursor: int = 0  # >=0 aligned at this token index; -1 lost
         self.align_blocked_until_completed_lines: int = -1
+
+        # Line endings — initialized by caller (proposer) after decoding text
+        self.line_ending_mode: str = "lf"
 
         # (no additional debug state)
 
@@ -328,11 +333,22 @@ class StaticTextProposer:
                 logger.info(
                     f"  [state:new] prediction tokens: {predicted_token_ids}")
                 try:
+                    pred_text = self._tokenizer.decode(predicted_token_ids)
                     logger.info(
-                        f"  [state:new] prediction text: {self._tokenizer.decode(predicted_token_ids)}"
-                    )
+                        f"  [state:new] prediction text: {pred_text}")
                 except Exception:
+                    pred_text = None
                     logger.info("  [state:new] prediction text: <decode error>")
+                # Detect initial line ending mode from prediction text (if any)
+                try:
+                    if pred_text is None:
+                        pred_text = self._tokenizer.decode(predicted_token_ids)
+                    mode = self._detect_line_ending_mode_from_text(pred_text)
+                except Exception:
+                    mode = "lf"
+                self._state[req_id].line_ending_mode = mode
+                if VERBOSE:
+                    logger.info(f"  [le] init mode={mode}")
 
         st = self._state[req_id]
 
@@ -380,6 +396,44 @@ class StaticTextProposer:
         # mismatch and continue so that debug logging still happens – this
         # is crucial when investigating why alignment fails in production.
         # ------------------------------------------------------------------
+
+        # Line-ending switching: if new segment contains any newline, detect
+        # the style in the latest context and switch modes if needed.
+        if new_segment and any(t in st.newline_set for t in new_segment):
+            # Decode a tail window for robust detection
+            tail_tok = ctx_tokens[max(0, len(ctx_tokens) - 128):]
+            try:
+                tail_text = self._tokenizer.decode(tail_tok)
+                # Find style of the last newline occurrence in the tail
+                last_nl = tail_text.rfind("\n")
+                if last_nl != -1:
+                    new_mode = "crlf" if last_nl > 0 and tail_text[last_nl - 1] == "\r" else "lf"
+                else:
+                    new_mode = None
+            except Exception:
+                new_mode = None
+
+            if new_mode and new_mode != st.line_ending_mode:
+                # Switch: convert prediction text and re-tokenize
+                try:
+                    cur_pred_text = self._tokenizer.decode(st.predicted_tokens)
+                except Exception:
+                    cur_pred_text = None
+                if cur_pred_text is not None:
+                    switched_text = self._convert_line_endings(cur_pred_text,
+                                                              new_mode)
+                    new_pred_tokens = self._tokenizer.encode(
+                        switched_text, add_special_tokens=False)
+                    if VERBOSE:
+                        logger.info(
+                            f"  [le] switch {st.line_ending_mode} -> {new_mode}; retokenized {len(st.predicted_tokens)} -> {len(new_pred_tokens)} tokens")
+                    st.predicted_tokens = list(new_pred_tokens)
+                    self._reindex_prediction(st)
+                    st.line_ending_mode = new_mode
+                    # Force re-alignment to be safe after retokenization
+                    st.pred_cursor = -1
+                    st.align_blocked_until_completed_lines = len(
+                        st.ctx_line_tuples) - 1
 
         # 1) Fast-path cursor advance if still aligned
         arr: Optional[np.ndarray]
@@ -565,6 +619,37 @@ class StaticTextProposer:
 
         self._global_newline_set = newline_set
         return newline_set
+
+    # --------------------------- line ending helpers ---------------------------
+
+    @staticmethod
+    def _detect_line_ending_mode_from_text(text: str) -> str:
+        """Return 'crlf' if text contains any "\r\n", otherwise 'lf'."""
+        return "crlf" if "\r\n" in text else "lf"
+
+    @staticmethod
+    def _convert_line_endings(text: str, to_mode: str) -> str:
+        """Convert all line endings in text to LF or CRLF.
+
+        First normalizes to LF by replacing CRLF and lone CR with LF, then
+        converts to the target mode.
+        """
+        # Normalize to LF
+        norm = text.replace("\r\n", "\n").replace("\r", "\n")
+        if to_mode == "lf":
+            return norm
+        if to_mode == "crlf":
+            return norm.replace("\n", "\r\n")
+        return norm
+
+    def _reindex_prediction(self, st: _ReqState) -> None:
+        """Recompute derived structures from st.predicted_tokens."""
+        st.predicted_line_tuples = _split_by_newline_tokens(
+            st.predicted_tokens, st.newline_set)
+        st.line_starts = [0]
+        for idx, tok in enumerate(st.predicted_tokens):
+            if tok in st.newline_set:
+                st.line_starts.append(idx + 1)
 
     # ------------------------------------------------------------------ draft model API compatibility
 
