@@ -187,3 +187,37 @@ This helps diagnose missed alignments, slow paths, and iteration-by-iteration ac
 ---
 
 Last updated: 2025-08-25
+
+
+## TODO 2025-08-29
+
+THE PLAN:
+- Make tests to just test static_text_proposer directly for fast iteration.  Create them in /tests/spec_decode/test_static_text_proposer.py
+- Tests should instantiate a StaticTextProposer. It will need a model name in the model_config, use HuggingFaceTB/SmolLM2-360M-Instruct.  Change StaticTextProposer to use transformer_utils.tokenizer.get_tokenizer() instead of the current path.
+- Tests should only be for the v1 path for now.
+- Write tests:
+  - Propose nothing, match nothing
+  - Propose exact, match every token
+  - Propose partial with a few variations.  They should compare two multi-line bits of text
+    with some overlap.  Adding/removing lines.
+
+Whether tests pass or not, we need to make major changes to StaticTextProposer:
+
+The way it currently works is that on every iteration it tries to align cursor lines and only responds with a prediction if they match.  align_cursor_lines is expensive, and it isn't needed if the previous alignment still lines up.  The way it should work is this:
+
+- We keep a cursor position which is an int offset into the prediction.  
+- It starts at zero, which means we assume that the first token generated will be the first token of the prediction.
+- Cursor >= 0 means we have a prediction for where we are in the prediction, -1 means we are lost
+- Each time we get new context tokens, if we have a prediction, we compare them to the next tokens in our predicted text.  If they match, then we advance the cursor past those tokens and return the next N tokens as our prediction.  If they don't match, then we set the cursor to -1 and move on to alignment.
+- Whether we are aligned or not, we continue to split the incoming context into separate lines like we already do.
+- When there cursor == -1, then we need to do an alignment.  It should be done using basically the same logic as we have now, aligning completed lines of the input with the lines of the prediction.
+- If we match the lines, AND the partial line matches, then the cursor position becomes len(context_token_ids) and we make our prediction of the next tokens.
+- If we have failed alignment, then don't attempt alignment again until we have a new completed line!
+
+### Task List
+- Read this document and the code in static_text_proposer.py and understand what the task is.  Write up the algorithm in comments at the top of static_text_proposer.py
+- Write the first set of tests as defined above, propose nothing, propose exact, and then at least three partial overlap tests.  They may not work!
+- Run the tests, make sure you can see the test output.  If you can't for some reason, then stop and tell me.
+- Now for the fun part, make the changes proposed above to the algorithm!  Write clean, elegant code that you would be proud to land in the vllm project.  Do NOT overdo defensive coding, only try to handle errors that you can handle gracefully, let others percolate up.  Make sure to make use of the PREDICTED_OUTPUTS_VERBOSE setting to print any debug information you need, for example to verify that we are only doing alignment when necessary.
+- Keep iterating until the tests pass and you are happy with the code you have written.
+- If you run into any road blocks or dead ends, don't do anything too weird, stop and ask me.

@@ -32,7 +32,7 @@ import uvloop  # type: ignore
 
 DEFAULT_ARG_LIST: List[str] = [
     "--enable-prefix-caching",
-    "--gpu-memory-utilization", "0.8",
+    "--gpu-memory-utilization", "0.5",
     "--max-model-len", "8192",
     "--speculative-config",
     '{"method":"static_text","num_speculative_tokens":32}',

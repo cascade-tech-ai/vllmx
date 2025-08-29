@@ -1,14 +1,36 @@
-"""Speculative *static-text* proposer (v1).
+"""Speculative static‑text proposer (v1).
 
-Single source of truth for static-text speculative-decoding logic used by
+Single source of truth for static‑text speculative‑decoding logic used by
 vLLM. The legacy v0 worker delegates to helpers defined here.
 
 Highlights
 ----------
-1. Robust line-level alignment of the generated context with the
+1. Robust line‑level alignment of the generated context with the
    user‑supplied prediction using RapidFuzz (optional) or difflib.
-2. Incremental per-request state to avoid re-processing the entire context.
-3. Per-request predictions from ``SamplingParams.predicted_outputs`` only.
+2. Incremental per‑request state to avoid re‑processing the entire context.
+3. Per‑request predictions from ``SamplingParams.predicted_outputs`` only.
+
+Algorithm (cursor + sparse alignment)
+-------------------------------------
+We maintain a per‑request integer cursor into the predicted token sequence.
+
+- cursor >= 0: we are aligned; cursor is the index in ``predicted_tokens``
+  that corresponds to the next token to generate.
+- cursor == -1: we are lost; we must realign before proposing again.
+
+On each call with the full output context tokens so far:
+1) Fast‑path compare: if cursor >= 0, compare only the newly added context
+   tokens to the next tokens in the prediction. If they match, advance the
+   cursor by the number of new tokens and immediately propose up to ``k``
+   next predicted tokens. If they do not match, set cursor = -1.
+2) Sparse alignment: while cursor == -1, attempt line‑level alignment only
+   when a new completed line appears in the context (i.e., after a newline).
+   We align completed context lines against predicted lines. If alignment
+   succeeds and the current partial line (if any) matches the prefix of the
+   corresponding predicted line, we set the cursor to the predicted token
+   index at the end of the current prefix and begin proposing again. If the
+   alignment fails, we suppress further alignment attempts until another line
+   completes.
 
 Implementation uses pure Python/NumPy on CPU.
 """
@@ -82,6 +104,9 @@ class _ReqState:
         "ctx_processed",
         "ctx_line_tuples",
         "current_line_tokens",
+        # cursor-based fast path
+        "pred_cursor",
+        "align_blocked_until_completed_lines",
         # optional debug fields
     )
 
@@ -102,6 +127,10 @@ class _ReqState:
         self.ctx_processed = 0
         self.ctx_line_tuples: List[Tuple[int, ...]] = []
         self.current_line_tokens: List[int] = []
+
+        # Cursor state
+        self.pred_cursor: int = 0  # >=0 aligned at this token index; -1 lost
+        self.align_blocked_until_completed_lines: int = -1
 
         # (no additional debug state)
 
@@ -272,10 +301,15 @@ class StaticTextProposer:
 
         # Lazily load tokenizer.
         if self._tokenizer is None:
-            from transformers import AutoTokenizer  # local import
+            # Use the shared vLLM tokenizer helper for consistency/caching.
+            from vllm.transformers_utils.tokenizer import get_tokenizer  # local import
 
-            model_name_or_path = self.vllm_config.model_config.model  # type: ignore[attr-defined]
-            self._tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, use_fast=True)
+            model_cfg = self.vllm_config.model_config  # type: ignore[attr-defined]
+            model_name_or_path = model_cfg.model
+            self._tokenizer = get_tokenizer(model_name_or_path,
+                                            trust_remote_code=getattr(
+                                                model_cfg, "trust_remote_code",
+                                                False))
 
         # print token ids and text for context_token_ids and predicted_token_ids
         logger.info(f"Context token ids: {context_token_ids.tolist()}")
@@ -295,15 +329,21 @@ class StaticTextProposer:
             self._state[req_id] = _ReqState(list(predicted_token_ids), newline_set)
             logger.info(f"  Created _ReqState: {(time.time() - start) * 1000:0.2f}ms")
 
-        st = self._state[req_id]    
+        st = self._state[req_id]
 
         ctx_tokens = context_token_ids.tolist()
+
+        # Capture previous processed length and the new segment of tokens.
+        prev_ctx_processed = st.ctx_processed
+        new_segment: List[int] = ctx_tokens[prev_ctx_processed:]
 
         # Fast path: reset when context shrinks (new prompt).
         if len(ctx_tokens) < st.ctx_processed:
             st.ctx_processed = 0
             st.ctx_line_tuples.clear()
             st.current_line_tokens.clear()
+            st.pred_cursor = 0
+            st.align_blocked_until_completed_lines = -1
 
         # Update incremental context buffers.
         for tok in ctx_tokens[st.ctx_processed:]:
@@ -315,14 +355,11 @@ class StaticTextProposer:
 
         st.ctx_processed = len(ctx_tokens)
 
-        last_is_nl = ctx_tokens and ctx_tokens[-1] in st.newline_set
+        last_is_nl = bool(ctx_tokens) and (ctx_tokens[-1] in st.newline_set)
 
-        if last_is_nl:
-            completed = st.ctx_line_tuples + [tuple()]
-            current_prefix: List[int] = []
-        else:
-            completed = st.ctx_line_tuples
-            current_prefix = list(st.current_line_tokens)
+        completed = st.ctx_line_tuples
+        current_prefix: List[int] = [] if last_is_nl else list(
+            st.current_line_tokens)
 
         # ------------------------------------------------------------------
         # Attempt alignment between *completed* context lines and the global
@@ -331,38 +368,93 @@ class StaticTextProposer:
         # is crucial when investigating why alignment fails in production.
         # ------------------------------------------------------------------
 
-        start = time.time()
-        line_cursor = _align_cursor_lines(st.predicted_line_tuples, completed)
-        logger.info(f"  _align_cursor_lines: {(time.time() - start) * 1000:0.2f}ms")
+        # 1) Fast-path cursor advance if still aligned
+        arr: Optional[np.ndarray]
+        arr = None
 
-        if line_cursor and line_cursor < len(st.predicted_line_tuples):
-            pred_line_start = st.line_starts[line_cursor]
+        if st.pred_cursor >= 0:
+            # Compare only the new segment against the prediction from cursor.
+            n_new = len(new_segment)
+            ok = True
+            if n_new > 0:
+                # Ensure we don't run past the prediction.
+                end_idx = st.pred_cursor + n_new
+                if end_idx > len(st.predicted_tokens):
+                    ok = False
+                else:
+                    expected = st.predicted_tokens[st.pred_cursor:end_idx]
+                    ok = expected == new_segment
 
-            # Build predicted line tokens for the *current* line.
-            pred_line_tokens: List[int] = []
-            idx = pred_line_start
-            while idx < len(st.predicted_tokens) and st.predicted_tokens[idx] not in st.newline_set:
-                pred_line_tokens.append(st.predicted_tokens[idx])
-                idx += 1
+            if ok:
+                st.pred_cursor += len(new_segment)
+            else:
+                st.pred_cursor = -1
+                # Allow an immediate alignment attempt on this call.
+                st.align_blocked_until_completed_lines = len(
+                    st.ctx_line_tuples) - 1
 
-            if current_prefix != pred_line_tokens[:len(current_prefix)]:
-                success = False
+        # 2) If lost, try sparse alignment only when a new line completes
+        if st.pred_cursor < 0:
+            can_align = len(st.ctx_line_tuples) > st.align_blocked_until_completed_lines
+            if can_align:
+                start = time.time()
+                line_cursor = _align_cursor_lines(st.predicted_line_tuples,
+                                                  completed)
+                logger.info(
+                    f"  _align_cursor_lines: {(time.time() - start) * 1000:0.2f}ms")
 
-            token_cursor = pred_line_start + len(current_prefix)
-            if token_cursor >= len(st.predicted_tokens):
-                success = False
+                if line_cursor is not None and line_cursor < len(
+                        st.predicted_line_tuples):
+                    pred_line_start = st.line_starts[line_cursor]
 
-            end = min(token_cursor + self.k, len(st.predicted_tokens))
-            arr = np.array(st.predicted_tokens[token_cursor:end], dtype=np.int32)
-        else:
-            arr = np.empty(0, dtype=np.int32)
+                    # Build predicted line tokens for the current line.
+                    pred_line_tokens: List[int] = []
+                    idx = pred_line_start
+                    while (idx < len(st.predicted_tokens)
+                           and st.predicted_tokens[idx] not in st.newline_set):
+                        pred_line_tokens.append(st.predicted_tokens[idx])
+                        idx += 1
 
-        logger.info(f"Context:\n" + "".join(self._tokenizer.decode(t) for t in st.ctx_line_tuples))
-        logger.info(f"Predicted {len(arr)} tokens: {self._tokenizer.decode(arr)}")
+                    # Verify current partial line matches prefix (string-wise)
+                    cur_txt = self._tokenizer.decode(list(current_prefix))
+                    pred_line_txt = self._tokenizer.decode(pred_line_tokens)
+                    if pred_line_txt.startswith(cur_txt):
+                        # Advance cursor by the number of tokens in the
+                        # current prefix (token-level position)
+                        st.pred_cursor = pred_line_start + len(current_prefix)
+                    else:
+                        # Block further attempts until another newline
+                        st.align_blocked_until_completed_lines = len(
+                            st.ctx_line_tuples)
+                else:
+                    # Alignment failed – block until another completed line
+                    st.align_blocked_until_completed_lines = len(
+                        st.ctx_line_tuples)
 
-        logger.info(f"  Proposed {arr.size} tokens in {(time.time() - propose_start) * 1000:0.2f}ms")
+        # If aligned, produce next k tokens
+        if st.pred_cursor >= 0:
+            end = min(st.pred_cursor + self.k, len(st.predicted_tokens))
+            if end > st.pred_cursor:
+                arr = np.array(st.predicted_tokens[st.pred_cursor:end],
+                               dtype=np.int32)
+            else:
+                arr = None
 
-        return arr if arr.size > 0 else None
+        if VERBOSE:
+            try:
+                ctx_lines_text = "".join(
+                    self._tokenizer.decode(list(t)) for t in st.ctx_line_tuples)
+            except Exception:
+                ctx_lines_text = "<decode error>"
+            logger.info(f"Context:\n{ctx_lines_text}")
+            if arr is not None:
+                logger.info(
+                    f"Predicted {arr.size} tokens: {self._tokenizer.decode(arr.tolist())}")
+            logger.info(
+                f"  Proposed {0 if arr is None else arr.size} tokens in {(time.time() - propose_start) * 1000:0.2f}ms"
+            )
+
+        return arr if (arr is not None and arr.size > 0) else None
 
     # ------------------------------------------------------------------ internal helpers
 
