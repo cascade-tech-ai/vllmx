@@ -311,14 +311,9 @@ class StaticTextProposer:
                                                 model_cfg, "trust_remote_code",
                                                 False))
 
-        # print token ids and text for context_token_ids and predicted_token_ids
-        logger.info(f"Context token ids: {context_token_ids.tolist()}")
-        logger.info(f"Context text: {self._tokenizer.decode(context_token_ids)}")
-        if predicted_token_ids:
-            logger.info(f"Predicted token ids: {predicted_token_ids}")
-            logger.info(f"Predicted text: {self._tokenizer.decode(predicted_token_ids)}")
-        else:
-            logger.info("No predicted token ids")
+        # Verbose header per call
+        if VERBOSE:
+            logger.info(f"[req={req_id}] propose() k={self.k}")
 
         propose_start = time.time()
 
@@ -327,7 +322,17 @@ class StaticTextProposer:
             start = time.time()
             newline_set: Set[int] = self._detect_newline_tokens(predicted_token_ids)
             self._state[req_id] = _ReqState(list(predicted_token_ids), newline_set)
-            logger.info(f"  Created _ReqState: {(time.time() - start) * 1000:0.2f}ms")
+            if VERBOSE:
+                logger.info(
+                    f"  [state:new] init in {(time.time() - start) * 1000:0.2f}ms")
+                logger.info(
+                    f"  [state:new] prediction tokens: {predicted_token_ids}")
+                try:
+                    logger.info(
+                        f"  [state:new] prediction text: {self._tokenizer.decode(predicted_token_ids)}"
+                    )
+                except Exception:
+                    logger.info("  [state:new] prediction text: <decode error>")
 
         st = self._state[req_id]
 
@@ -336,6 +341,14 @@ class StaticTextProposer:
         # Capture previous processed length and the new segment of tokens.
         prev_ctx_processed = st.ctx_processed
         new_segment: List[int] = ctx_tokens[prev_ctx_processed:]
+        if VERBOSE:
+            logger.info(
+                f"  [ctx:new] tokens: {new_segment if new_segment else '[]'}")
+            try:
+                logger.info(
+                    f"  [ctx:new] text: {self._tokenizer.decode(new_segment)}")
+            except Exception:
+                logger.info("  [ctx:new] text: <decode error>")
 
         # Fast path: reset when context shrinks (new prompt).
         if len(ctx_tokens) < st.ctx_processed:
@@ -384,7 +397,34 @@ class StaticTextProposer:
                 else:
                     expected = st.predicted_tokens[st.pred_cursor:end_idx]
                     ok = expected == new_segment
-
+            # Log cursor preview and match status
+            if VERBOSE:
+                preview_end = min(st.pred_cursor + self.k,
+                                  len(st.predicted_tokens))
+                preview = st.predicted_tokens[st.pred_cursor:preview_end]
+                logger.info(
+                    f"  [cursor] pos={st.pred_cursor} next_k_ids={preview}")
+                try:
+                    logger.info(
+                        f"  [cursor] next_k_text: {self._tokenizer.decode(preview)}")
+                except Exception:
+                    logger.info("  [cursor] next_k_text: <decode error>")
+                if n_new > 0:
+                    if ok:
+                        logger.info("  [cursor] match=new tokens match prediction")
+                    else:
+                        try:
+                            got_txt = self._tokenizer.decode(new_segment)
+                            exp_txt = self._tokenizer.decode(
+                                st.predicted_tokens[st.pred_cursor:st.pred_cursor + n_new])
+                        except Exception:
+                            got_txt = exp_txt = "<decode error>"
+                        logger.info(
+                            f"  [cursor] mismatch got_ids={new_segment} got_text={got_txt}"
+                        )
+                        logger.info(
+                            f"           expected_ids={st.predicted_tokens[st.pred_cursor:st.pred_cursor + n_new]} expected_text={exp_txt}"
+                        )
             if ok:
                 st.pred_cursor += len(new_segment)
             else:
@@ -397,6 +437,14 @@ class StaticTextProposer:
         if st.pred_cursor < 0:
             can_align = len(st.ctx_line_tuples) > st.align_blocked_until_completed_lines
             if can_align:
+                if VERBOSE and st.ctx_line_tuples:
+                    last_line = st.ctx_line_tuples[-1]
+                    try:
+                        last_line_text = self._tokenizer.decode(list(last_line))
+                    except Exception:
+                        last_line_text = "<decode error>"
+                    logger.info(
+                        f"  [align] last completed line text: {last_line_text}")
                 start = time.time()
                 line_cursor = _align_cursor_lines(st.predicted_line_tuples,
                                                   completed)
@@ -416,20 +464,33 @@ class StaticTextProposer:
                         idx += 1
 
                     # Verify current partial line matches prefix (string-wise)
-                    cur_txt = self._tokenizer.decode(list(current_prefix))
-                    pred_line_txt = self._tokenizer.decode(pred_line_tokens)
+                    try:
+                        cur_txt = self._tokenizer.decode(list(current_prefix))
+                        pred_line_txt = self._tokenizer.decode(pred_line_tokens)
+                    except Exception:
+                        cur_txt = pred_line_txt = "<decode error>"
                     if pred_line_txt.startswith(cur_txt):
                         # Advance cursor by the number of tokens in the
                         # current prefix (token-level position)
                         st.pred_cursor = pred_line_start + len(current_prefix)
+                        if VERBOSE:
+                            logger.info(
+                                "  [align] aligned; partial-line prefix matches predicted line start"
+                            )
                     else:
                         # Block further attempts until another newline
                         st.align_blocked_until_completed_lines = len(
                             st.ctx_line_tuples)
+                        if VERBOSE:
+                            logger.info(
+                                "  [align] aligned; partial-line prefix does NOT match predicted line start"
+                            )
                 else:
                     # Alignment failed – block until another completed line
                     st.align_blocked_until_completed_lines = len(
                         st.ctx_line_tuples)
+                    if VERBOSE:
+                        logger.info("  [align] no valid alignment")
 
         # If aligned, produce next k tokens
         if st.pred_cursor >= 0:
@@ -441,17 +502,17 @@ class StaticTextProposer:
                 arr = None
 
         if VERBOSE:
-            try:
-                ctx_lines_text = "".join(
-                    self._tokenizer.decode(list(t)) for t in st.ctx_line_tuples)
-            except Exception:
-                ctx_lines_text = "<decode error>"
-            logger.info(f"Context:\n{ctx_lines_text}")
-            if arr is not None:
+            if arr is not None and arr.size > 0:
+                try:
+                    pred_txt = self._tokenizer.decode(arr.tolist())
+                except Exception:
+                    pred_txt = "<decode error>"
                 logger.info(
-                    f"Predicted {arr.size} tokens: {self._tokenizer.decode(arr.tolist())}")
+                    f"  [predict] ids={arr.tolist()} text={pred_txt}")
+            else:
+                logger.info("  [predict] (no match, no prediction)")
             logger.info(
-                f"  Proposed {0 if arr is None else arr.size} tokens in {(time.time() - propose_start) * 1000:0.2f}ms"
+                f"  [done] proposed={0 if arr is None else arr.size} tokens in {(time.time() - propose_start) * 1000:0.2f}ms"
             )
 
         return arr if (arr is not None and arr.size > 0) else None
