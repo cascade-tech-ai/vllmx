@@ -117,4 +117,6 @@ def serve():
 
     # Note: we use Popen so the web_server decorator can keep the container
     # alive while vLLM runs in the background.
-    subprocess.Popen(" ".join(cmd), shell=True)
+    full_cmd = " ".join(cmd)
+    print(f"[serve] Launching vllm: {full_cmd}", flush=True)
+    subprocess.Popen(full_cmd, shell=True)
