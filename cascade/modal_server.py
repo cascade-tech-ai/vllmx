@@ -59,6 +59,14 @@ vllm_image = (
         # Ensure v1 path in recent vLLM builds
         "VLLM_USE_V1": "1",
     })
+    # Propagate local overrides into the container's env for dev `serve`.
+    .env({
+        "MODEL_ID": MODEL_ID,
+        "VLLM_PORT": str(VLLM_PORT),
+        "N_GPU": str(N_GPU),
+        "GPU_TYPE": GPU_TYPE,
+        "VLLM_ARGS": os.getenv("VLLM_ARGS", ""),
+    })
 )
 
 
@@ -79,6 +87,13 @@ vllm_image = (
 @modal.web_server(port=VLLM_PORT, startup_timeout=10 * MINUTES)
 def serve():
     import subprocess
+
+    # Echo effective configuration
+    print(
+        f"[serve] MODEL_ID={MODEL_ID} N_GPU={N_GPU} GPU_TYPE={GPU_TYPE} VLLM_PORT={VLLM_PORT}",
+        flush=True,
+    )
+    print(f"[serve] extra VLLM_ARGS={os.getenv('VLLM_ARGS','')}", flush=True)
 
     cmd = [
         "vllm",
