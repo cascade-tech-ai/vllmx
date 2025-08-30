@@ -12,10 +12,20 @@ Environment overrides (optional):
   VLLM_PORT              Port to bind (default: 8000)
   N_GPU                  GPU count (default: 1)
   GPU_TYPE               GPU type (default: H100)
-  FAST_BOOT              "1" for eager; "0" to allow compile (default: 1)
+
+CLI overrides (preferred):
+  --model-id <id>        Model id/path
+  --vllm-port <port>     Port to bind
+  --n-gpu <N>            GPU count
+  --gpu-type <name>      GPU type (e.g., H100, A100)
+
+Any additional CLI args are forwarded to `vllm serve ...` unchanged. We also
+enforce a default `--served-model-name predict` unless already provided.
 """
 
 import os
+import sys
+import argparse
 import modal
 
 app = modal.App("example-vllm-inference")
@@ -26,17 +36,27 @@ hf_cache_vol = modal.Volume.from_name("huggingface-cache",
 vllm_cache_vol = modal.Volume.from_name("vllm-cache",
                                        create_if_missing=True)
 
-VLLM_PORT = int(os.getenv("VLLM_PORT", "8000"))
-N_GPU = int(os.getenv("N_GPU", "1"))
-GPU_TYPE = os.getenv("GPU_TYPE", "H100")
+_parser = argparse.ArgumentParser(add_help=False)
+_parser.add_argument("--model-id")
+_parser.add_argument("--vllm-port", type=int)
+_parser.add_argument("--n-gpu", type=int)
+_parser.add_argument("--gpu-type")
+_cli_args, _forward_args = _parser.parse_known_args(sys.argv[1:])
+
+VLLM_PORT = int(os.getenv("VLLM_PORT", str(_cli_args.vllm_port
+                                            if _cli_args.vllm_port
+                                            else 8000)))
+N_GPU = int(os.getenv("N_GPU",
+                      str(_cli_args.n_gpu if _cli_args.n_gpu else 1)))
+GPU_TYPE = os.getenv("GPU_TYPE",
+                     _cli_args.gpu_type if _cli_args.gpu_type else "H100")
 MINUTES = 60
 
-# FAST_BOOT=1 -> --enforce-eager, faster cold starts
-FAST_BOOT = os.getenv("FAST_BOOT", "1") in ("1", "true", "True")
-
 # Default model (tweak to your needs)
-MODEL_ID = os.getenv("MODEL_ID",
-                     "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8")
+MODEL_ID = os.getenv(
+    "MODEL_ID",
+    _cli_args.model_id
+    if _cli_args.model_id else "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8")
 
 # Base CUDA image with Python.
 vllm_image = (
@@ -85,10 +105,16 @@ def serve():
         str(VLLM_PORT),
         "--tensor-parallel-size",
         str(N_GPU),
-        "--enforce-eager" if FAST_BOOT else "--no-enforce-eager",
     ]
+
+    # Add default served-model-name if not provided by user.
+    if "--served-model-name" not in _forward_args:
+        cmd += ["--served-model-name", "predict"]
+
+    # Append any user-provided vLLM args at the end so they can override
+    # defaults (port/host/tensor-parallel/etc.).
+    cmd += _forward_args
 
     # Note: we use Popen so the web_server decorator can keep the container
     # alive while vLLM runs in the background.
     subprocess.Popen(" ".join(cmd), shell=True)
-
