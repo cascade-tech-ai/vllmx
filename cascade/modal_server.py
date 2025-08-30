@@ -103,12 +103,20 @@ def serve():
         "0.0.0.0",
         "--port",
         str(VLLM_PORT),
-        "--tensor-parallel-size",
-        str(N_GPU),
     ]
 
     import shlex
     extra_args = shlex.split(os.getenv("VLLM_ARGS", ""))
+    # If user did not specify TP explicitly, default TP to N_GPU.
+    def _has_opt(args: list[str], names: list[str]) -> bool:
+        for n in names:
+            if n in args:
+                return True
+            if any(a.startswith(n + "=") for a in args):
+                return True
+        return False
+    if not _has_opt(extra_args, ["--tensor-parallel-size", "-tp"]):
+        cmd += ["--tensor-parallel-size", str(N_GPU)]
     # Add default served-model-name if not provided by user.
     if "--served-model-name" not in extra_args:
         cmd += ["--served-model-name", "predict"]
