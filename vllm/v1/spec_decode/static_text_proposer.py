@@ -306,15 +306,13 @@ class StaticTextProposer:
 
         # Lazily load tokenizer.
         if self._tokenizer is None:
-            # Use the shared vLLM tokenizer helper for consistency/caching.
-            from vllm.transformers_utils.tokenizer import get_tokenizer  # local import
+            # Use cached tokenizer from config (per‑process singleton).
+            from vllm.transformers_utils.tokenizer import (
+                cached_tokenizer_from_config,
+            )  # local import
 
             model_cfg = self.vllm_config.model_config  # type: ignore[attr-defined]
-            model_name_or_path = model_cfg.model
-            self._tokenizer = get_tokenizer(model_name_or_path,
-                                            trust_remote_code=getattr(
-                                                model_cfg, "trust_remote_code",
-                                                False))
+            self._tokenizer = cached_tokenizer_from_config(model_cfg)
 
         # Verbose header per call
         if VERBOSE:
@@ -656,3 +654,10 @@ class StaticTextProposer:
     def load_model(self, *args, **kwargs):  # noqa: D401 – interface stub
         # StaticTextProposer is not a model – nothing to load.
         pass
+
+    # --------------------------- lifecycle hooks ------------------------------
+
+    def finish_requests(self, req_ids: list[str] | set[str] | tuple[str, ...]):
+        """Drop per-request state for finished/aborted requests."""
+        for rid in req_ids:
+            self._state.pop(rid, None)

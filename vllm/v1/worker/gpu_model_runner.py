@@ -341,6 +341,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         new/resumed/paused/finished request in the batch.
         """
         # Remove finished requests from the cached states.
+        if scheduler_output.finished_req_ids:
+            # Notify drafter, if it maintains per-request state.
+            if hasattr(self, "drafter") and hasattr(self.drafter,
+                                                     "finish_requests"):
+                try:
+                    self.drafter.finish_requests(scheduler_output.finished_req_ids)  # type: ignore[attr-defined]
+                except Exception:
+                    logger.debug("drafter.finish_requests hook failed",
+                                 exc_info=True)
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.encoder_cache.pop(req_id, None)
