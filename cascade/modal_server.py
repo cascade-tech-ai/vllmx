@@ -24,8 +24,6 @@ enforce a default `--served-model-name predict` unless already provided.
 """
 
 import os
-import sys
-import argparse
 import modal
 
 app = modal.App("example-vllm-inference")
@@ -36,27 +34,14 @@ hf_cache_vol = modal.Volume.from_name("huggingface-cache",
 vllm_cache_vol = modal.Volume.from_name("vllm-cache",
                                        create_if_missing=True)
 
-_parser = argparse.ArgumentParser(add_help=False)
-_parser.add_argument("--model-id")
-_parser.add_argument("--vllm-port", type=int)
-_parser.add_argument("--n-gpu", type=int)
-_parser.add_argument("--gpu-type")
-_cli_args, _forward_args = _parser.parse_known_args(sys.argv[1:])
-
-VLLM_PORT = int(os.getenv("VLLM_PORT", str(_cli_args.vllm_port
-                                            if _cli_args.vllm_port
-                                            else 8000)))
-N_GPU = int(os.getenv("N_GPU",
-                      str(_cli_args.n_gpu if _cli_args.n_gpu else 1)))
-GPU_TYPE = os.getenv("GPU_TYPE",
-                     _cli_args.gpu_type if _cli_args.gpu_type else "H100")
+VLLM_PORT = int(os.getenv("VLLM_PORT", "8000"))
+N_GPU = int(os.getenv("N_GPU", "1"))
+GPU_TYPE = os.getenv("GPU_TYPE", "H100")
 MINUTES = 60
 
 # Default model (tweak to your needs)
-MODEL_ID = os.getenv(
-    "MODEL_ID",
-    _cli_args.model_id
-    if _cli_args.model_id else "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8")
+MODEL_ID = os.getenv("MODEL_ID",
+                     "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8")
 
 # Base CUDA image with Python.
 vllm_image = (
@@ -107,13 +92,15 @@ def serve():
         str(N_GPU),
     ]
 
+    import shlex
+    extra_args = shlex.split(os.getenv("VLLM_ARGS", ""))
     # Add default served-model-name if not provided by user.
-    if "--served-model-name" not in _forward_args:
+    if "--served-model-name" not in extra_args:
         cmd += ["--served-model-name", "predict"]
 
     # Append any user-provided vLLM args at the end so they can override
     # defaults (port/host/tensor-parallel/etc.).
-    cmd += _forward_args
+    cmd += extra_args
 
     # Note: we use Popen so the web_server decorator can keep the container
     # alive while vLLM runs in the background.
