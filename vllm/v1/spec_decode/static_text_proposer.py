@@ -44,6 +44,7 @@ import numpy as np
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 import time
 
@@ -307,10 +308,6 @@ class StaticTextProposer:
         # Lazily load tokenizer.
         if self._tokenizer is None:
             # Use cached tokenizer from config (per‑process singleton).
-            from vllm.transformers_utils.tokenizer import (
-                cached_tokenizer_from_config,
-            )  # local import
-
             model_cfg = self.vllm_config.model_config  # type: ignore[attr-defined]
             self._tokenizer = cached_tokenizer_from_config(model_cfg)
 
