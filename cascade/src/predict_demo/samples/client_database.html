@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Simple Client Database (Readable Demo)</title>
+</head>
+<body>
+  <h1>Client Database</h1>
+
+  <!-- Minimal form: keep all fields -->
+  <form id="clientForm">
+    <div>
+      <label>Full Name
+        <input id="name" placeholder="Ada Lovelace" required />
+      </label>
+    </div>
+    <div>
+      <label>Email
+        <input id="email" type="email" placeholder="ada@example.com" required />
+      </label>
+    </div>
+    <div>
+      <label>Phone
+        <input id="phone" placeholder="+33 6 12 34 56 78" />
+      </label>
+    </div>
+    <div>
+      <label>Company
+        <input id="company" placeholder="Analytical Engines, Inc." />
+      </label>
+    </div>
+    <div>
+      <label>Status
+        <select id="status">
+          <option>Active</option>
+          <option>Inactive</option>
+          <option>Prospect</option>
+        </select>
+      </label>
+    </div>
+    <div>
+      <label>Notes
+        <textarea id="notes" placeholder="High-priority client…"></textarea>
+      </label>
+    </div>
+    <button type="submit">Add Client</button>
+    <button type="button" id="clearForm">Clear Form</button>
+  </form>
+
+  <h2>Clients</h2>
+  <!-- Very plain table to display what was added -->
+  <table border="1" cellpadding="6" id="clientTable">
+    <thead>
+      <tr>
+        <th>Name</th><th>Email</th><th>Phone</th>
+        <th>Company</th><th>Status</th><th>Notes</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <script>
+    // Keep things tiny: in-memory array only (no persistence).
+    const clients = [];
+
+    // Grab elements once (no fancy framework).
+    const form = document.getElementById("clientForm");
+    const rows = document.getElementById("rows");
+    const clearBtn = document.getElementById("clearForm");
+
+    // Helper to get a field by id.
+    const $ = (id) => document.getElementById(id);
+
+    // Render the whole table from the array.
+    function renderTable() {
+      rows.innerHTML = ""; // clear existing rows
+      for (const c of clients) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${escape(c.name)}</td>
+          <td>${escape(c.email)}</td>
+          <td>${escape(c.phone)}</td>
+          <td>${escape(c.company)}</td>
+          <td>${escape(c.status)}</td>
+          <td>${escape(c.notes)}</td>
+        `;
+        rows.appendChild(tr);
+      }
+    }
+
+    // Minimal escaping to keep code safe/readable.
+    function escape(s) {
+      return String(s || "").replace(/[&<>"']/g, m => (
+        { "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[m]
+      ));
+    }
+
+    // Add a client on submit.
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const client = {
+        name: $("name").value.trim(),
+        email: $("email").value.trim(),
+        phone: $("phone").value.trim(),
+        company: $("company").value.trim(),
+        status: $("status").value,
+        notes: $("notes").value.trim(),
+      };
+      if (!client.name || !client.email) {
+        alert("Please provide at least a name and email.");
+        return;
+      }
+      clients.push(client);
+      renderTable();
+      form.reset();
+    });
+
+    // Clear just the form fields.
+    clearBtn.addEventListener("click", () => form.reset());
+
+    // Initial empty render (optional).
+    renderTable();
+  </script>
+</body>
+</html>

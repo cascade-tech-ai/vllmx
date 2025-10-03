@@ -48,6 +48,8 @@ class CompletionOutput:
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
     lora_request: Optional[LoRARequest] = None
+    spec_tokens_proposed_total: int = 0
+    spec_tokens_accepted_total: int = 0
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -59,7 +61,9 @@ class CompletionOutput:
                 f"cumulative_logprob={self.cumulative_logprob}, "
                 f"logprobs={self.logprobs}, "
                 f"finish_reason={self.finish_reason}, "
-                f"stop_reason={self.stop_reason})")
+                f"stop_reason={self.stop_reason}, "
+                f"spec_tokens_proposed_total={self.spec_tokens_proposed_total}, "
+                f"spec_tokens_accepted_total={self.spec_tokens_accepted_total})")
 
 
 @dataclass
@@ -175,6 +179,10 @@ class RequestOutput:
                             next_completion.cumulative_logprob)
                         completion.finish_reason = next_completion.finish_reason
                         completion.stop_reason = next_completion.stop_reason
+                        completion.spec_tokens_proposed_total = (
+                            next_completion.spec_tokens_proposed_total)
+                        completion.spec_tokens_accepted_total = (
+                            next_completion.spec_tokens_accepted_total)
                     else:
                         # Replace the output with the new one
                         self.outputs[i] = next_completion

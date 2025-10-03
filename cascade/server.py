@@ -32,8 +32,8 @@ import uvloop  # type: ignore
 
 DEFAULT_ARG_LIST: List[str] = [
     "--enable-prefix-caching",
-    "--gpu-memory-utilization", "0.5",
-    "--max-model-len", "8192",
+    "--gpu-memory-utilization", "0.1",
+    "--max-model-len", "4096",
     "--speculative-config",
     '{"method":"static_text","num_speculative_tokens":32}',
     "--model", "HuggingFaceTB/SmolLM2-360M-Instruct",

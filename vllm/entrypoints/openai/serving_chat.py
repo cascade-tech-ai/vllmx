@@ -482,6 +482,8 @@ class OpenAIServingChat(OpenAIServing):
         # Send response for each token for each request.n (index)
         num_choices = 1 if request.n is None else request.n
         previous_num_tokens = [0] * num_choices
+        spec_tokens_proposed = [0] * num_choices
+        spec_tokens_accepted = [0] * num_choices
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
         num_cached_tokens = None
@@ -954,6 +956,15 @@ class OpenAIServingChat(OpenAIServing):
                     # set the previous values for the next iteration
                     previous_num_tokens[i] += len(output.token_ids)
 
+                    curr_spec_proposed = output.spec_tokens_proposed_total
+                    curr_spec_accepted = output.spec_tokens_accepted_total
+                    delta_spec_proposed = max(
+                        0, curr_spec_proposed - spec_tokens_proposed[i])
+                    delta_spec_accepted = max(
+                        0, curr_spec_accepted - spec_tokens_accepted[i])
+                    spec_tokens_proposed[i] = curr_spec_proposed
+                    spec_tokens_accepted[i] = curr_spec_accepted
+
                     # if the message delta is None (e.g. because it was a
                     # "control token" for tool calls or the parser otherwise
                     # wasn't ready to send a token, then
@@ -993,7 +1004,9 @@ class OpenAIServingChat(OpenAIServing):
                             logprobs=logprobs,
                             finish_reason=None,
                             token_ids=(as_list(output.token_ids)
-                                       if request.return_token_ids else None))
+                                       if request.return_token_ids else None),
+                            spec_tokens_proposed=delta_spec_proposed,
+                            spec_tokens_accepted=delta_spec_accepted)
 
                     # if the model is finished generating
                     else:
@@ -1062,7 +1075,9 @@ class OpenAIServingChat(OpenAIServing):
                             finish_reason=finish_reason_,
                             stop_reason=output.stop_reason,
                             token_ids=(as_list(output.token_ids)
-                                       if request.return_token_ids else None))
+                                       if request.return_token_ids else None),
+                            spec_tokens_proposed=delta_spec_proposed,
+                            spec_tokens_accepted=delta_spec_accepted)
 
                         finish_reason_sent[i] = True
 

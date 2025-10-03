@@ -288,7 +288,10 @@ class RequestState:
             logprobs=logprobs,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
-            stop_reason=stop_reason if finished else None)
+            stop_reason=stop_reason if finished else None,
+            spec_tokens_proposed_total=self.spec_tokens_proposed_total,
+            spec_tokens_accepted_total=self.spec_tokens_accepted_total,
+        )
 
     def _new_pooling_output(
         self,

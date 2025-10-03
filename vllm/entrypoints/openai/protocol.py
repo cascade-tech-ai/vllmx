@@ -1839,6 +1839,8 @@ class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
     stop_reason: Optional[Union[int, str]] = None
     # not part of the OpenAI spec but for tracing the tokens
     token_ids: Optional[list[int]] = None
+    spec_tokens_proposed: Optional[int] = None
+    spec_tokens_accepted: Optional[int] = None
 
 
 class ChatCompletionStreamResponse(OpenAIBaseModel):
