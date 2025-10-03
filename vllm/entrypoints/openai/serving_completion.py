@@ -22,6 +22,7 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionResponseChoice,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
+                                              CompletionTokenUsageInfo,
                                               ErrorResponse,
                                               PromptTokenUsageInfo,
                                               RequestResponseMetadata,
@@ -36,7 +37,7 @@ from vllm.inputs.data import (EmbedsPrompt, TokensPrompt, is_embeds_prompt,
                               is_tokens_prompt)
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.outputs import RequestOutput
+from vllm.outputs import RequestOutput, SpeculativeUsage
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import as_list, merge_async_iterators
@@ -324,6 +325,7 @@ class OpenAIServingCompletion(OpenAIServing):
         has_echoed = [False] * num_choices * num_prompts
         num_prompt_tokens = [0] * num_prompts
         num_cached_tokens = None
+        last_spec_usage: Optional[SpeculativeUsage] = None
         first_iteration = True
 
         stream_options = request.stream_options
@@ -339,6 +341,9 @@ class OpenAIServingCompletion(OpenAIServing):
             async for prompt_idx, res in result_generator:
                 prompt_token_ids = res.prompt_token_ids
                 prompt_logprobs = res.prompt_logprobs
+
+                if res.speculative_usage is not None:
+                    last_spec_usage = res.speculative_usage
 
                 if first_iteration:
                     num_cached_tokens = res.num_cached_tokens
@@ -463,10 +468,17 @@ class OpenAIServingCompletion(OpenAIServing):
                 completion_tokens=total_completion_tokens,
                 total_tokens=total_prompt_tokens + total_completion_tokens,
             )
-
             if self.enable_prompt_tokens_details and num_cached_tokens:
-                final_usage_info.prompt_tokens_details = PromptTokenUsageInfo(
-                    cached_tokens=num_cached_tokens)
+                final_usage_info.prompt_tokens_details = (
+                    PromptTokenUsageInfo(cached_tokens=num_cached_tokens))
+            if last_spec_usage:
+                final_usage_info.completion_tokens_details = (
+                    CompletionTokenUsageInfo(
+                        accepted_prediction_tokens=last_spec_usage.accepted,
+                        rejected_prediction_tokens=(
+                            last_spec_usage.proposed
+                            - last_spec_usage.accepted),
+                    ))
 
             if include_usage:
                 final_usage_chunk = CompletionStreamResponse(
@@ -584,6 +596,14 @@ class OpenAIServingCompletion(OpenAIServing):
                 and last_final_res.num_cached_tokens):
             usage.prompt_tokens_details = PromptTokenUsageInfo(
                 cached_tokens=last_final_res.num_cached_tokens)
+
+        if last_final_res and last_final_res.speculative_usage:
+            accepted_tokens = last_final_res.speculative_usage.accepted
+            rejected_tokens = last_final_res.speculative_usage.proposed - accepted_tokens
+            usage.completion_tokens_details = CompletionTokenUsageInfo(
+                accepted_prediction_tokens=accepted_tokens,
+                rejected_prediction_tokens=rejected_tokens,
+            )
 
         request_metadata.final_usage_info = usage
         if final_res_batch:

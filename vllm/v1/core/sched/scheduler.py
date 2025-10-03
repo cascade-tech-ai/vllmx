@@ -892,6 +892,8 @@ class Scheduler(SchedulerInterface):
             generated_token_ids = sampled_token_ids[
                 req_index] if sampled_token_ids else []
 
+            spec_tokens_proposed_step = 0
+            spec_tokens_accepted_step = 0
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id))
             if scheduled_spec_token_ids:
@@ -904,6 +906,8 @@ class Scheduler(SchedulerInterface):
                 # num_computed_tokens is decreased by the number of rejected
                 # tokens.
                 request.num_computed_tokens -= num_rejected
+                spec_tokens_proposed_step = num_draft_tokens
+                spec_tokens_accepted_step = max(num_accepted, 0)
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
                     num_draft_tokens=num_draft_tokens,
@@ -971,6 +975,8 @@ class Scheduler(SchedulerInterface):
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
+                        spec_tokens_proposed=spec_tokens_proposed_step,
+                        spec_tokens_accepted=spec_tokens_accepted_step,
                     ))
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.

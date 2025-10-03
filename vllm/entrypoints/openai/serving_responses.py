@@ -465,12 +465,14 @@ class OpenAIServingResponses(OpenAIServing):
             assert isinstance(context, HarmonyContext)
             output = self._make_response_output_items_with_harmony(context)
             num_tool_output_tokens = context.num_tool_output_tokens
+            spec_usage = context.spec_usage
         else:
             assert isinstance(context, SimpleContext)
             final_res = context.last_output
             assert final_res is not None
             assert len(final_res.outputs) == 1
             final_output = final_res.outputs[0]
+            spec_usage = final_res.speculative_usage
 
             output = self._make_response_output_items(request, final_output,
                                                       tokenizer)
@@ -484,7 +486,10 @@ class OpenAIServingResponses(OpenAIServing):
         num_generated_tokens = context.num_output_tokens
         num_cached_tokens = context.num_cached_tokens
         num_reasoning_tokens = context.num_reasoning_tokens
-
+        accepted_prediction_tokens = spec_usage.accepted if spec_usage else 0
+        rejected_prediction_tokens = ((spec_usage.proposed
+                                       - spec_usage.accepted)
+                                      if spec_usage else 0)
         usage = ResponseUsage(
             input_tokens=num_prompt_tokens,
             output_tokens=num_generated_tokens,
@@ -493,7 +498,10 @@ class OpenAIServingResponses(OpenAIServing):
                 cached_tokens=num_cached_tokens),
             output_tokens_details=OutputTokensDetails(
                 reasoning_tokens=num_reasoning_tokens,
-                tool_output_tokens=num_tool_output_tokens),
+                tool_output_tokens=num_tool_output_tokens,
+                accepted_prediction_tokens=accepted_prediction_tokens,
+                rejected_prediction_tokens=rejected_prediction_tokens,
+            ),
         )
         response = ResponsesResponse.from_request(
             request,

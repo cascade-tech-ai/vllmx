@@ -33,7 +33,8 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaFunctionCall, DeltaMessage,
     DeltaToolCall, ErrorResponse, FunctionCall, FunctionDefinition,
-    PromptTokenUsageInfo, RequestResponseMetadata, ToolCall, UsageInfo)
+    CompletionTokenUsageInfo, PromptTokenUsageInfo, RequestResponseMetadata,
+    ToolCall, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
                                                     clamp_prompt_logprobs)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
@@ -44,7 +45,7 @@ from vllm.entrypoints.utils import get_max_tokens
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.outputs import CompletionOutput, RequestOutput, SpeculativeUsage
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
@@ -484,6 +485,7 @@ class OpenAIServingChat(OpenAIServing):
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
         num_cached_tokens = None
+        last_spec_usage: Optional[SpeculativeUsage] = None
         if self.use_harmony:
             harmony_parsers = [
                 get_streamable_parser_for_assistant()
@@ -560,6 +562,8 @@ class OpenAIServingChat(OpenAIServing):
 
         try:
             async for res in result_generator:
+                if res.speculative_usage is not None:
+                    last_spec_usage = res.speculative_usage
                 if res.prompt_token_ids is not None:
                     num_prompt_tokens = len(res.prompt_token_ids)
                     if res.encoder_prompt_token_ids is not None:
@@ -1092,6 +1096,13 @@ class OpenAIServingChat(OpenAIServing):
                 if self.enable_prompt_tokens_details and num_cached_tokens:
                     final_usage.prompt_tokens_details = PromptTokenUsageInfo(
                         cached_tokens=num_cached_tokens)
+                if last_spec_usage:
+                    final_usage.completion_tokens_details = (
+                        CompletionTokenUsageInfo(
+                            accepted_prediction_tokens=last_spec_usage.accepted,
+                            rejected_prediction_tokens=(
+                                last_spec_usage.proposed - last_spec_usage.accepted),
+                        ))
 
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
@@ -1111,6 +1122,13 @@ class OpenAIServingChat(OpenAIServing):
                 completion_tokens=num_completion_tokens,
                 total_tokens=num_prompt_tokens + num_completion_tokens,
             )
+            if last_spec_usage:
+                request_metadata.final_usage_info.completion_tokens_details = (
+                    CompletionTokenUsageInfo(
+                        accepted_prediction_tokens=last_spec_usage.accepted,
+                        rejected_prediction_tokens=(
+                            last_spec_usage.proposed - last_spec_usage.accepted),
+                    ))
 
             # Log complete streaming response if output logging is enabled
             if self.enable_log_outputs and self.request_logger:
@@ -1403,6 +1421,13 @@ class OpenAIServingChat(OpenAIServing):
         if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
             usage.prompt_tokens_details = PromptTokenUsageInfo(
                 cached_tokens=final_res.num_cached_tokens)
+        if final_res.speculative_usage:
+            accepted_tokens = final_res.speculative_usage.accepted
+            rejected_tokens = final_res.speculative_usage.proposed - accepted_tokens
+            usage.completion_tokens_details = CompletionTokenUsageInfo(
+                accepted_prediction_tokens=accepted_tokens,
+                rejected_prediction_tokens=rejected_tokens,
+            )
 
         request_metadata.final_usage_info = usage
 

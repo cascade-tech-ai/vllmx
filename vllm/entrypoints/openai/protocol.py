@@ -134,11 +134,18 @@ class PromptTokenUsageInfo(OpenAIBaseModel):
     cached_tokens: Optional[int] = None
 
 
+class CompletionTokenUsageInfo(OpenAIBaseModel):
+    reasoning_tokens: Optional[int] = None
+    accepted_prediction_tokens: Optional[int] = None
+    rejected_prediction_tokens: Optional[int] = None
+
+
 class UsageInfo(OpenAIBaseModel):
     prompt_tokens: int = 0
     total_tokens: int = 0
     completion_tokens: Optional[int] = 0
     prompt_tokens_details: Optional[PromptTokenUsageInfo] = None
+    completion_tokens_details: Optional[CompletionTokenUsageInfo] = None
 
 
 class RequestResponseMetadata(BaseModel):
@@ -1867,6 +1874,8 @@ class InputTokensDetails(OpenAIBaseModel):
 class OutputTokensDetails(OpenAIBaseModel):
     reasoning_tokens: int = 0
     tool_output_tokens: int = 0
+    accepted_prediction_tokens: Optional[int] = None
+    rejected_prediction_tokens: Optional[int] = None
 
 
 class ResponseUsage(OpenAIBaseModel):

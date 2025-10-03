@@ -9,7 +9,8 @@ from typing import Any, Optional, Union, cast
 import torch
 
 from vllm.outputs import (CompletionOutput, PoolingOutput,
-                          PoolingRequestOutput, RequestOutput)
+                          PoolingRequestOutput, RequestOutput,
+                          SpeculativeUsage)
 from vllm.sampling_params import RequestOutputKind
 from vllm.tracing import (SpanAttributes, SpanKind, Tracer,
                           extract_trace_context)
@@ -118,6 +119,12 @@ class RequestState:
 
         self.stats = RequestStateStats(
             arrival_time=arrival_time) if log_stats else None
+
+        # Speculative decoding counters surfaced to the front-end. These track
+        # request-level totals so we can attach them to emitted RequestOutputs
+        # and, ultimately, user-visible responses.
+        self.spec_tokens_proposed_total: int = 0
+        self.spec_tokens_accepted_total: int = 0
 
     @classmethod
     def from_new_request(
@@ -246,6 +253,10 @@ class RequestState:
             finished=finished,
             kv_transfer_params=kv_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
+            speculative_usage=SpeculativeUsage(
+                proposed=self.spec_tokens_proposed_total,
+                accepted=self.spec_tokens_accepted_total,
+            ),
         )
 
     def _new_completion_output(
@@ -411,6 +422,10 @@ class OutputProcessor:
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
             req_state.num_cached_tokens = engine_core_output.num_cached_tokens
+            req_state.spec_tokens_proposed_total += (
+                engine_core_output.spec_tokens_proposed)
+            req_state.spec_tokens_accepted_total += (
+                engine_core_output.spec_tokens_accepted)
             req_state.is_prefilling = False
 
             if pooling_output is None:

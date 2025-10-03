@@ -14,7 +14,7 @@ from vllm.entrypoints.harmony_utils import (
     get_encoding, get_streamable_parser_for_assistant, render_for_completion)
 from vllm.entrypoints.tool import Tool
 from vllm.entrypoints.tool_server import ToolServer
-from vllm.outputs import RequestOutput
+from vllm.outputs import RequestOutput, SpeculativeUsage
 
 if TYPE_CHECKING:
     from mcp.client import ClientSession
@@ -123,6 +123,7 @@ class HarmonyContext(ConversationContext):
         self.num_cached_tokens = 0
         self.num_reasoning_tokens = 0
         self.num_tool_output_tokens = 0
+        self.spec_usage: Optional[SpeculativeUsage] = None
 
         # Turn tracking - replaces multiple individual tracking variables
         self.current_turn = TurnTokens()
@@ -150,6 +151,7 @@ class HarmonyContext(ConversationContext):
             # Move current turn to previous turn for next turn's calculations
             self.previous_turn = self.current_turn.copy()
             output_msgs = self.parser.messages
+            self.spec_usage = output.speculative_usage
         else:
             # Tool output.
             output_msgs = output
