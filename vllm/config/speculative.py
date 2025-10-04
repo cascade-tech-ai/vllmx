@@ -32,7 +32,7 @@ logger = init_logger(__name__)
 SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
                             "mlp_speculator", "draft_model", "deepseek_mtp",
                             "ernie_mtp", "qwen3_next_mtp", "mimo_mtp",
-                            "longcat_flash_mtp", "mtp"]
+                            "longcat_flash_mtp", "mtp", "static_text"]
 MTP_MODEL_TYPES = ("deepseek_mtp", "mimo_mtp", "glm4_moe_mtp", "ernie_mtp",
                    "qwen3_next_mtp", "longcat_flash_mtp")
 
@@ -233,6 +233,9 @@ class SpeculativeConfig:
                     self.quantization = self.target_model_config.quantization
             elif self.method in ("ngram", "[ngram]"):
                 self.model = "ngram"
+            elif self.method == "static_text":
+                # Static-text proposer reuses the target model configuration.
+                pass
             else:
                 raise ValueError(
                     "num_speculative_tokens was provided but without "
@@ -281,7 +284,11 @@ class SpeculativeConfig:
             self.prompt_lookup_max = 0
             self.prompt_lookup_min = 0
 
-            if self.model is not None:
+            if self.method == "static_text":
+                self.draft_model_config = self.target_model_config
+                self.draft_parallel_config = self.target_parallel_config
+
+            elif self.model is not None:
                 # TODO: Move this import to the top once `ModelConfig`
                 # lives in `vllm.config.model`.
                 from vllm.config import ModelConfig
@@ -563,6 +570,7 @@ class SpeculativeConfig:
 
     def __repr__(self) -> str:
         method = self.method
-        model = None if method == "ngram" else self.draft_model_config.model
+        model = (None if method in ("ngram", "static_text") else
+                 self.draft_model_config.model)
         num_spec_tokens = self.num_speculative_tokens
         return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"

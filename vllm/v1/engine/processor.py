@@ -415,8 +415,31 @@ class Processor:
                     self.model_config.max_model_len - seq_len
             sampling_params.update_from_generation_config(
                 self.generation_config_fields, eos_token_id)
+            request_tokenizer: Optional[AnyTokenizer] = None
             if self.tokenizer is not None:
-                sampling_params.update_from_tokenizer(self.tokenizer)
+                request_tokenizer = self.tokenizer
+                sampling_params.update_from_tokenizer(request_tokenizer)
+
+            predicted = sampling_params.predicted_outputs
+            if (predicted is not None
+                    and predicted.predicted_token_ids is None
+                    and predicted.predicted_text):
+                if request_tokenizer is None:
+                    logger.warning(
+                        "Request %s supplied predicted_text but tokenizer "
+                        "is unavailable; ignoring prediction.", request_id)
+                else:
+                    try:
+                        predicted.predicted_token_ids = request_tokenizer.encode(  # type: ignore[assignment]
+                            predicted.predicted_text,
+                            add_special_tokens=False,
+                        )
+                    except Exception as exc:  # pragma: no cover
+                        logger.warning(
+                            "Failed to tokenize predicted_text for request %s: %s",
+                            request_id,
+                            exc,
+                        )
         else:
             pooling_params = params.clone()
 

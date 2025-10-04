@@ -97,6 +97,7 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+from vllm.v1.spec_decode.static_text_proposer import StaticTextProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -280,6 +281,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.speculative_config and get_pp_group().is_last_rank:
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
+            elif self.speculative_config.method == "static_text":
+                self.drafter = StaticTextProposer(self.vllm_config)
             elif self.speculative_config.use_eagle():
                 self.drafter = EagleProposer(self.vllm_config, self.device,
                                              self)  # type: ignore
@@ -533,6 +536,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         The SamplingMetadata is updated and copied to the GPU if there is a
         new/resumed/paused/finished request in the batch.
         """
+        if (scheduler_output.finished_req_ids and hasattr(self, "drafter")
+                and hasattr(self.drafter, "finish_requests")):
+            self.drafter.finish_requests(scheduler_output.finished_req_ids)  # type: ignore[attr-defined]
+
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
@@ -2475,6 +2482,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.input_batch.num_tokens_no_spec,
                 self.input_batch.token_ids_cpu,
                 self.input_batch.spec_decode_unsupported_reqs)
+        elif self.speculative_config.method == "static_text":
+            assert isinstance(sampled_token_ids, list)
+            assert isinstance(self.drafter, StaticTextProposer)
+            draft_token_ids = self.drafter.generate_drafts(
+                input_batch=self.input_batch,
+                requests=self.requests,
+                sampled_token_ids=sampled_token_ids,
+            )
         elif self.speculative_config.method == "medusa":
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, MedusaProposer)
