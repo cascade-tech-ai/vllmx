@@ -47,6 +47,7 @@ from vllm.logprobs import Logprob
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
                                   RequestOutputKind, SamplingParams)
+from vllm.spec_decode.predicted_output_params import PredictedOutputParams
 from vllm.utils import random_uuid, resolve_obj_by_qualname
 
 logger = init_logger(__name__)
@@ -607,6 +608,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description="KVTransfer parameters used for disaggregated serving.")
 
+    # ------------------------------------------------------------------
+    # Predicted outputs (speculative decoding helper)
+    # ------------------------------------------------------------------
+    class _PredictionParam(OpenAIBaseModel):  # noqa: D401 – nested helper
+        type: Literal["content"] = "content"
+        content: str
+
+    prediction: Optional[_PredictionParam] = None
+
     vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
         default=None,
         description=("Additional request parameters with string or "
@@ -733,6 +743,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             bad_words= self.bad_words,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
+            predicted_outputs=(
+                PredictedOutputParams(predicted_text=self.prediction.content)
+                if self.prediction is not None else None),
         )
 
     def _get_guided_json_from_tool(
