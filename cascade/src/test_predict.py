@@ -8,7 +8,12 @@ from typing import Optional
 from openai import AsyncOpenAI
 
 
-SYSTEM_MESSAGE = "repeat the following code verbatim, no markdown formatting and no other text"
+SYSTEM_PROMPT_TEMPLATE = (
+    "Given the following source file and a user prompt, modify the source file "
+    "according to the user prompt's instructions and output the result with no other "
+    "text or extra markdown formatting, just the modified content.\n\n"
+    "source:\n{source_text}"
+)
 
 GREEN = "\033[92m"
 ORANGE = "\033[38;5;208m"
@@ -41,11 +46,7 @@ def read_text(path: str) -> str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Benchmark predicted outputs against a model")
     parser.add_argument("--source", required=True, help="Path to the source document")
-    parser.add_argument(
-        "--predict",
-        default="0",
-        help="Path to the predicted output document (defaults to literal '0')",
-    )
+    parser.add_argument("--prompt", required=True, help="Prompt instructions to apply to the source")
     parser.add_argument("-n", type=int, default=1, dest="n", help="Number of concurrent requests")
     parser.add_argument("--model", default="gpt-4.1", help="Model name to query")
     parser.add_argument("--base_url", default="", help="Override the API base URL")
@@ -54,6 +55,11 @@ def parse_args() -> argparse.Namespace:
         "--show-stream",
         action="store_true",
         help="Print streamed tokens as they arrive",
+    )
+    parser.add_argument(
+        "--no-predict",
+        action="store_true",
+        help="Skip sending the source as a prediction payload",
     )
     args = parser.parse_args()
     if args.n < 1:
@@ -66,7 +72,7 @@ async def execute_request(
     client: AsyncOpenAI,
     model: str,
     messages: list[dict[str, str]],
-    prediction_text: str,
+    prediction_text: Optional[str],
     total_requests: int,
     verbose: bool,
     show_stream: bool,
@@ -77,12 +83,15 @@ async def execute_request(
     printed_raw = False
     stream_usage = None
 
-    async with client.chat.completions.stream(
-        model=model,
-        messages=messages,
-        prediction={"type": "content", "content": prediction_text},
-        stream_options={"include_usage": True},
-    ) as stream:
+    stream_kwargs = {
+        "model": model,
+        "messages": messages,
+        "stream_options": {"include_usage": True},
+    }
+    if prediction_text is not None:
+        stream_kwargs["prediction"] = {"type": "content", "content": prediction_text}
+
+    async with client.chat.completions.stream(**stream_kwargs) as stream:
         async for event in stream:
             event_type = getattr(event, "type", None)
             if event_type == "chunk":
@@ -158,18 +167,20 @@ async def execute_request(
 async def run_benchmark(
     args: argparse.Namespace,
     source_text: str,
-    prediction_text: str,
+    prompt_text: str,
 ) -> list[RequestResult]:
     client_kwargs: dict[str, str] = {}
     if args.base_url:
         client_kwargs["base_url"] = args.base_url
     client = AsyncOpenAI(**client_kwargs)
 
+    system_message = SYSTEM_PROMPT_TEMPLATE.format(source_text=source_text)
     message_template = [
-        {"role": "system", "content": SYSTEM_MESSAGE},
-        {"role": "user", "content": source_text},
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": prompt_text},
     ]
 
+    prediction_payload = None if args.no_predict else source_text
     tasks: list[asyncio.Task[RequestResult]] = []
     try:
         for index in range(1, args.n + 1):
@@ -180,7 +191,7 @@ async def run_benchmark(
                     client=client,
                     model=args.model,
                     messages=messages,
-                    prediction_text=prediction_text,
+                    prediction_text=prediction_payload,
                     total_requests=args.n,
                     verbose=args.verbose,
                     show_stream=args.show_stream,
@@ -265,13 +276,8 @@ def print_averages(results: list[RequestResult]) -> None:
 def main() -> None:
     args = parse_args()
     source_text = read_text(args.source)
-    if args.predict == "0":
-        prediction_text = "0"
-    else:
-        prediction_text = read_text(args.predict)
-
     try:
-        results = asyncio.run(run_benchmark(args, source_text, prediction_text))
+        results = asyncio.run(run_benchmark(args, source_text, args.prompt))
     except KeyboardInterrupt:
         print("Interrupted", file=sys.stderr)
         sys.exit(1)
