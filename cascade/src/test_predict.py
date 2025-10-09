@@ -3,6 +3,7 @@ import asyncio
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from openai import AsyncOpenAI
@@ -45,7 +46,8 @@ def read_text(path: str) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Benchmark predicted outputs against a model")
-    parser.add_argument("--source", required=True, help="Path to the source document")
+    parser.add_argument("--source", help="Path to the source document")
+    parser.add_argument("--system", help="Path to a file containing the full system prompt")
     parser.add_argument("--prompt", required=True, help="Prompt instructions to apply to the source")
     parser.add_argument("-n", type=int, default=1, dest="n", help="Number of concurrent requests")
     parser.add_argument("--model", default="gpt-4.1", help="Model name to query")
@@ -61,9 +63,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip sending the source as a prediction payload",
     )
+    parser.add_argument(
+        "--prediction",
+        help="Path to a file containing the prediction payload to send",
+    )
     args = parser.parse_args()
     if args.n < 1:
         parser.error("-n must be at least 1")
+    if bool(args.source) == bool(args.system):
+        parser.error("Exactly one of --source or --system must be provided")
+    if args.system and not (args.no_predict or args.prediction):
+        parser.error("--system requires either --no-predict or --prediction")
     return args
 
 
@@ -166,21 +176,20 @@ async def execute_request(
 
 async def run_benchmark(
     args: argparse.Namespace,
-    source_text: str,
+    system_message: str,
     prompt_text: str,
+    prediction_payload: Optional[str],
 ) -> list[RequestResult]:
     client_kwargs: dict[str, str] = {}
     if args.base_url:
         client_kwargs["base_url"] = args.base_url
     client = AsyncOpenAI(**client_kwargs)
 
-    system_message = SYSTEM_PROMPT_TEMPLATE.format(source_text=source_text)
     message_template = [
         {"role": "system", "content": system_message},
         {"role": "user", "content": prompt_text},
     ]
 
-    prediction_payload = None if args.no_predict else source_text
     tasks: list[asyncio.Task[RequestResult]] = []
     try:
         for index in range(1, args.n + 1):
@@ -275,9 +284,33 @@ def print_averages(results: list[RequestResult]) -> None:
 
 def main() -> None:
     args = parse_args()
-    source_text = read_text(args.source)
+    prompt_path = Path(args.prompt)
+    if prompt_path.is_file():
+        prompt_text = read_text(str(prompt_path))
+    else:
+        prompt_text = args.prompt
+    source_text: Optional[str] = None
+    if args.source:
+        source_text = read_text(args.source)
+        system_message = SYSTEM_PROMPT_TEMPLATE.format(source_text=source_text)
+    else:
+        system_message = read_text(args.system)
+
+    if args.no_predict:
+        prediction_payload: Optional[str] = None
+    elif args.prediction:
+        prediction_payload = read_text(args.prediction)
+    else:
+        prediction_payload = source_text
     try:
-        results = asyncio.run(run_benchmark(args, source_text, args.prompt))
+        results = asyncio.run(
+            run_benchmark(
+                args,
+                system_message=system_message,
+                prompt_text=prompt_text,
+                prediction_payload=prediction_payload,
+            )
+        )
     except KeyboardInterrupt:
         print("Interrupted", file=sys.stderr)
         sys.exit(1)
