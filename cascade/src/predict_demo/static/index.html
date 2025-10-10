@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Predict Demo</title>
+    <link rel="stylesheet" href="styles.css?v=2" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="top-bar">
+        <h1 class="top-bar-brand">
+          <a href="https://www.cascadetech.ai" class="brand-link">Cascade Technologies</a>
+          <span class="brand-divider">-</span>
+          <span class="brand-subtitle">VLLM Predicted Outputs Demo</span>
+        </h1>
+        <div id="config-info" class="config-info"></div>
+      </header>
+      <div class="layout">
+        <main class="workspace">
+          <div class="tabs">
+            <button class="tab-button active" data-tab="welcome" id="tab-welcome">
+              Welcome
+            </button>
+            <button class="tab-button" data-tab="input" id="tab-input">
+              Input
+            </button>
+            <button class="tab-button" data-tab="output" id="tab-output">
+              Output
+            </button>
+          </div>
+          <div class="panels">
+            <section class="panel welcome-panel active" data-panel="welcome">
+              <div class="welcome-content">
+                <h2>VLLM Predicted Outputs Demo</h2>
+                <p class="welcome-intro">
+                  Predicted Outputs is a way of speeding up LLM generation by using a prediction about the
+                  contents of the output to process tokens in parallel. LLMs must process their output tokens one at a
+                  time due to the fact that they require the previous token as input. Predicted Outputs allows you
+                  to take a guess at the contents of the output, and when you get it right, you can output many tokens
+                  for the price of one.
+                </p>
+
+                <p>Predicted Outputs uses standard "diff" algorithms to realign your prediction with the output
+                  after a miss.  Because the cost of mis-prediction is so small, and the benefits of processing tokens in
+                  parallel are so large, accurate prediction of even a few lines can speed up your generation, and some
+                  use cases stand to get massive speedups of 2x, 10x, or more:
+                <ul>
+                  <li>Coding agents</li>
+                  <li>Document modification</li>
+                  <li>Json object mutation</li>
+                </ul>
+
+                <p>
+                  Read more about Predicted Outputs in our <a href="https://cascadetech.ai/blog/vllm-predicted-outputs/">blog post</a>.
+                </p>
+                <h3>Explore The Demo</h3>
+                <p>This walk-through focuses on the common workflow of modifying an existing document such as source code.</p>
+                <ul>
+                  <li>Load, type, or paste a document into the input window.</li>
+                  <li>Describe the change you want in the prompt field, then submit.</li>
+                  <li><span class="token-accepted">Green</span> output tokens were processed in parallel and appear almost instantly.</li>
+                  <li><span class="token-rejected">Red</span> tokens mark minor mispredictions; the slowdown is typically negligible.</li>
+                  <li>Plain text indicates portions without an active prediction, so they stream at normal speed.</li>
+                </ul>
+                <h3>Under The Hood</h3>
+                <p>
+                  Predicted Outputs lives in Cascade Technology's <a
+                        href="https://github.com/cascade-tech-ai/vllmx">vllmx</a>
+                  repo, a light fork where we develop experimental features for vLLM before contributing them upstream.
+                  The feature integrates with vLLM's speculative decoding path and works with most models and
+                  configurations that already support speculative decoding.
+                </p>
+                <button id="try-it-now" type="button" class="cta-button">Try It Now</button>
+              </div>
+            </section>
+            <section class="panel input-panel" data-panel="input">
+              <textarea id="document-input" spellcheck="false"></textarea>
+            </section>
+            <section class="panel output-panel" data-panel="output">
+              <div id="output-view" class="output-view"></div>
+            </section>
+          </div>
+        </main>
+        <aside class="sidebar">
+          <section class="controls">
+            <h2>Controls</h2>
+            <div class="control-group">
+              <label for="sample-select">Document</label>
+              <div class="document-loader">
+                <select id="sample-select">
+                  <option value="">Select sample…</option>
+                </select>
+                <button id="load-sample" type="button">Load</button>
+              </div>
+            </div>
+            <div class="control-group checkbox">
+              <label>
+                <input type="checkbox" id="use-prediction" checked /> Use
+                Prediction
+              </label>
+            </div>
+            <div class="control-group">
+              <label for="temperature">Temperature</label>
+              <div class="slider">
+                <input
+                  type="range"
+                  id="temperature"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value="0"
+                />
+                <span id="temperature-value">0.00</span>
+              </div>
+            </div>
+            <div class="control-group control-actions">
+              <button id="clear-fields" type="button" class="secondary-button">
+                Clear
+              </button>
+            </div>
+          </section>
+          <section class="stats">
+            <h2>Stats</h2>
+            <dl id="stats-list">
+              <div class="stat-row"><dt>Model Passes</dt><dd id="stat-chunks">0</dd></div>
+              <div class="stat-row"><dt>Tokens</dt><dd id="stat-tokens">0</dd></div>
+              <div class="stat-row"><dt>Accepted</dt><dd id="stat-accepted">0</dd></div>
+              <div class="stat-row"><dt>Proposed</dt><dd id="stat-proposed">0</dd></div>
+              <div class="stat-row"><dt>Predicted %</dt><dd id="stat-acceptance-total">0.0%</dd></div>
+              <div class="stat-row"><dt>Accepted %</dt><dd id="stat-acceptance-proposed">0.0%</dd></div>
+              <div class="stat-row"><dt>Prompt Time</dt><dd id="stat-prompt-time">0.00s</dd></div>
+              <div class="stat-row"><dt>Generation Time</dt><dd id="stat-generation-time">0.00s</dd></div>
+              <div class="stat-row"><dt>Total Time</dt><dd id="stat-total-time">0.00s</dd></div>
+            </dl>
+          </section>
+        </aside>
+      </div>
+      <footer class="prompt-bar">
+        <label for="prompt-input" class="prompt-label">Prompt</label>
+        <input
+          id="prompt-input"
+          type="text"
+          placeholder="Describe the change you want…"
+          autocomplete="off"
+        />
+        <button id="submit-button" type="button" disabled>Submit</button>
+        <span id="status-text" class="status-text"></span>
+      </footer>
+    </div>
+    <script type="module" src="main.js?v=5"></script>
+  </body>
+</html>
