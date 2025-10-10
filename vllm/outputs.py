@@ -60,6 +60,14 @@ class CompletionOutput:
 
 
 @dataclass
+class SpeculativeUsage:
+    """Aggregated speculative decoding counters for a request."""
+
+    proposed: int
+    accepted: int
+
+
+@dataclass
 class PoolingOutput:
     """The output data of one pooling output of a request.
 
@@ -116,6 +124,7 @@ class RequestOutput:
         *,
         multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None,
         kv_transfer_params: Optional[dict[str, Any]] = None,
+        speculative_usage: Optional[SpeculativeUsage] = None,
         # Forward compatibility, code that uses args added in new release can
         # still run with older versions of vLLM without breaking.
         **kwargs: Any,
@@ -136,6 +145,7 @@ class RequestOutput:
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
         self.kv_transfer_params = kv_transfer_params
+        self.speculative_usage = speculative_usage
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""
@@ -167,6 +177,9 @@ class RequestOutput:
                     break
             else:
                 self.outputs.append(next_completion)
+
+        if next_output.speculative_usage is not None:
+            self.speculative_usage = next_output.speculative_usage
 
     def __repr__(self) -> str:
         return (f"RequestOutput(request_id={self.request_id}, "

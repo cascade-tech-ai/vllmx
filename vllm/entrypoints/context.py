@@ -15,7 +15,7 @@ from vllm.entrypoints.harmony_utils import (
     get_encoding, get_streamable_parser_for_assistant, render_for_completion)
 from vllm.entrypoints.tool import Tool
 from vllm.entrypoints.tool_server import ToolServer
-from vllm.outputs import RequestOutput
+from vllm.outputs import RequestOutput, SpeculativeUsage
 
 if TYPE_CHECKING:
     from mcp.client import ClientSession
@@ -96,6 +96,7 @@ class SimpleContext(ConversationContext):
         self.num_cached_tokens = 0
         # todo num_reasoning_tokens is not implemented yet.
         self.num_reasoning_tokens = 0
+        self.spec_usage: Optional[SpeculativeUsage] = None
 
     def append_output(self, output) -> None:
         self.last_output = output
@@ -104,6 +105,8 @@ class SimpleContext(ConversationContext):
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
+        if output.speculative_usage is not None:
+            self.spec_usage = output.speculative_usage
 
     def need_builtin_tool_call(self) -> bool:
         return False
@@ -143,6 +146,7 @@ class HarmonyContext(ConversationContext):
         self.num_cached_tokens = 0
         self.num_reasoning_tokens = 0
         self.num_tool_output_tokens = 0
+        self.spec_usage: Optional[SpeculativeUsage] = None
 
         # Turn tracking - replaces multiple individual tracking variables
         self.current_turn = TurnTokens()
@@ -176,6 +180,8 @@ class HarmonyContext(ConversationContext):
             output_msgs = self.parser.messages
             # The responses finish reason is set in the last message
             self.finish_reason = output.outputs[0].finish_reason
+            if output.speculative_usage is not None:
+                self.spec_usage = output.speculative_usage
         else:
             # Tool output.
             output_msgs = output

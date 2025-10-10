@@ -518,6 +518,13 @@ class OpenAIServingResponses(OpenAIServing):
         num_generated_tokens = context.num_output_tokens
         num_cached_tokens = context.num_cached_tokens
         num_reasoning_tokens = context.num_reasoning_tokens
+        accepted_prediction_tokens = 0
+        rejected_prediction_tokens = 0
+        spec_usage = getattr(context, "spec_usage", None)
+        if spec_usage is not None:
+            accepted_prediction_tokens = spec_usage.accepted
+            rejected_prediction_tokens = max(spec_usage.proposed -
+                                             accepted_prediction_tokens, 0)
 
         usage = ResponseUsage(
             input_tokens=num_prompt_tokens,
@@ -527,7 +534,10 @@ class OpenAIServingResponses(OpenAIServing):
                 cached_tokens=num_cached_tokens),
             output_tokens_details=OutputTokensDetails(
                 reasoning_tokens=num_reasoning_tokens,
-                tool_output_tokens=num_tool_output_tokens),
+                tool_output_tokens=num_tool_output_tokens,
+                accepted_prediction_tokens=accepted_prediction_tokens,
+                rejected_prediction_tokens=rejected_prediction_tokens,
+            ),
         )
         response = ResponsesResponse.from_request(
             request,
